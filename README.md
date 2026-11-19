@@ -12,21 +12,46 @@ Keeping up with AI-for-materials research takes time, and a LinkedIn feed mixes 
 
 ## Architecture
 
+One daily run, top to bottom:
+
 ```mermaid
-flowchart LR
-    A[LinkedIn feed] --> B[Playwright MCP server]
-    B --> C[Extractor JavaScript]
-    C --> D[Rule prefilter]
-    D --> E[Local LLM: Ollama / mimo-v2.6]
-    E --> F[(SQLite)]
-    F --> G[Connection queue export]
-    F --> I[Codex with web search: select 5-15, find sources, summarize]
-    I --> J[summary.md + source URLs]
-    J --> K[NotebookLM via Playwright MCP]
-    K --> L[Audio Overview episode]
-    J --> M[Email]
-    L --> M
-    G --> M
+flowchart TD
+    T(["Windows Task Scheduler<br/>radar daily, 08:30"]) --> S1
+
+    subgraph SCAN["1. Read the feed: read-only browser"]
+        S1["Playwright MCP<br/>agent Chromium, LinkedIn profile"] --> S2["extract_feed.js<br/>text, author, degree, links"]
+        S2 --> S3{"Promoted<br/>or empty?"}
+    end
+
+    S3 -- yes --> DROP["Skipped"]
+    S3 -- no --> L1
+
+    subgraph SCREEN["2. First-pass screen: local GPU"]
+        L1["Ollama, mimo-v2.6<br/>core / adjacent / skip"] --> DB[("SQLite<br/>posts and authors")]
+    end
+
+    DB --> Q["Connection queue<br/>connect_queue.md and .csv<br/>you send requests by hand"]
+    DB --> C1
+
+    subgraph RESEARCH["3. Select and research: Codex with web search"]
+        C1["Review every saved post"] --> C2["Keep 5 to 15 impactful items<br/>reject the rest with reasons"]
+        C2 --> C3["Find primary sources<br/>and related coverage"]
+        C3 --> C4["summary.md<br/>sources.txt"]
+    end
+
+    subgraph PODCAST["4. Podcast: NotebookLM, host-guarded browser"]
+        N1["New notebook<br/>upload summary.md, add source URLs"] --> N2["Customise Audio Overview<br/>Deep dive, focus prompt"]
+        N2 --> N3["Wait for generation<br/>download episode.m4a"]
+        N3 --> N4{"Under the<br/>email size budget?"}
+        N4 -- no --> N5["Re-encode to MP3"]
+    end
+
+    C4 --> N1
+    C4 --> E1
+    Q --> E1
+    N4 -- yes --> E1
+    N5 --> E1
+    E1(["5. Gmail to you<br/>digest, queue, podcast attached"])
 ```
 
 MCP is the Model Context Protocol, which connects the Python orchestrator to the browser server. The local large language model (LLM) is a permissive first-pass screen. Codex makes the final selection.
