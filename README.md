@@ -2,6 +2,8 @@
 
 Keeping up with AI-for-materials research takes time, and a LinkedIn feed mixes research with posts that do not report scientific results. Research Radar gives a computational materials scientist a daily researched briefing and a list of researchers to connect with by hand, with the goal of making the feed more relevant.
 
+Jump to: [Architecture](#architecture) · [Installation](#installation) · [Usage](#usage)
+
 ## What it does
 
 - Scans the LinkedIn feed and classifies posts against a field profile.
@@ -82,18 +84,68 @@ NotebookLM has no consumer API, so the agent drives it in a second browser profi
 
 The repository ignores `data/`, which contains feed records and the browser profile. Tests use synthetic fixtures. Selected post text and author information are included in the task sent to Codex for research.
 
-## Requirements
+## Installation
+
+### Requirements
 
 - Windows 11
-- Python 3.12 or later and `uv`
-- Node.js, for `npx`
-- Ollama with `mimo-v2.6` (6.6 GB; fits a 16 GB GPU)
-- Codex CLI, logged in
-- Playwright Chromium
+- An NVIDIA GPU with at least 8 GB of video memory (VRAM) recommended for the local model. A CPU also works, but is slower.
+- About 15 GB of free disk space
+- A LinkedIn account
+- A Google account for NotebookLM and Gmail
+- An OpenAI account for the Codex command-line interface (CLI)
 
-## Setup
+### 1. Install the tools
 
-Run these commands from the repository root in PowerShell.
+Open PowerShell and install Git, Python, uv, Node.js, and Ollama:
+
+```powershell
+winget install --id Git.Git -e
+```
+
+```powershell
+winget install --id Python.Python.3.12 -e
+```
+
+```powershell
+winget install --id astral-sh.uv -e
+```
+
+```powershell
+winget install --id OpenJS.NodeJS.LTS -e
+```
+
+```powershell
+winget install --id Ollama.Ollama -e
+```
+
+Open a new PowerShell window so Windows can find the installed tools. Install Codex CLI and sign in:
+
+```powershell
+npm install -g @openai/codex
+```
+
+```powershell
+codex login
+```
+
+### 2. Get the code
+
+Clone the repository and enter its folder:
+
+```powershell
+git clone https://github.com/AbrarFaiyad/research-radar.git
+```
+
+```powershell
+cd research-radar
+```
+
+Run the remaining commands from the `research-radar` folder.
+
+### 3. Create the Python environment
+
+A virtual environment keeps the project's Python packages together.
 
 ```powershell
 uv venv -p 3.12 .venv
@@ -104,32 +156,114 @@ uv pip install -p .venv -e ".[dev]"
 ```
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks activation, run the following once, then retry activation:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Alternatively, call `.\.venv\Scripts\radar.exe` directly in place of `radar`.
+
+### 4. Install the agent browser and the local model
+
+Install Chromium, the browser used by the agent:
+
+```powershell
 npx -y playwright@1.65.0-alpha-2026-10-30 install chromium
 ```
+
+Download the local model. The download is about 6.6 GB.
 
 ```powershell
 ollama pull mimo-v2.6
 ```
 
+### 5. Configure
+
+Copy the example configuration:
+
 ```powershell
 Copy-Item config/config.example.toml config/config.toml
 ```
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+Edit `config/config.toml`. Under `[email]`, set `enabled = true` and set `to` to your email address. If a different Gmail account will send the email, set `sender` to that address. Optionally, adjust the `[scan]` limits and the `[notebooklm]` podcast `length`.
+
+Edit `config/field_profile.md` to describe your field and the topics you want to follow. Git ignores `config/config.toml`, so it will not be included in commits.
+
+### 6. Sign in once
+
+Sign in to LinkedIn in the browser window that opens:
 
 ```powershell
 radar login
 ```
 
-Log in to LinkedIn in the browser window.
+Sign in to Google for NotebookLM in the next browser window:
 
 ```powershell
 radar notebooklm-login
 ```
 
-Sign in to Google in the browser window. Start Ollama before running a scan or demo.
+You enter these passwords in the browser; the agent does not need them.
+
+For email, enable 2-Step Verification on the sending Google account and create a [Gmail App Password](https://myaccount.google.com/apppasswords). An App Password is a separate password for an app. Run the command below and paste it at the hidden prompt. The password is stored in Windows Credential Manager.
+
+```powershell
+radar email-setup
+```
+
+### 7. Test it
+
+Start Ollama, then run the offline demo. It uses synthetic posts and replaces any existing `data/demo/` folder.
+
+```powershell
+radar demo
+```
+
+Run the tests:
+
+```powershell
+.\.venv\Scripts\python -m pytest
+```
+
+Scan up to 15 LinkedIn posts, create a digest, and send the email:
+
+```powershell
+radar scan --max-posts 15
+```
+
+```powershell
+radar digest
+```
+
+```powershell
+radar email
+```
+
+### 8. Run it every day
+
+Register a daily run for 08:30:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 08:30
+```
+
+The task runs while you are logged in. Logs are saved in `data\logs\`. To remove the task:
+
+```powershell
+Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
+```
+
+### Troubleshooting
+
+- **“LinkedIn feed not visible (not logged in?)”**: Run `radar login` again.
+- **“No SMTP password stored”**: Run `radar email-setup`.
+- **“Ollama model ... not reachable”**: Start Ollama and run `ollama pull mimo-v2.6`.
+- **Podcast failed after a NotebookLM page change**: The email still sends. Retry with `radar podcast`. The page selectors are in `src/radar/notebooklm.py`.
+- **Git reports “detected dubious ownership” in a cloud-synced folder**: Run `git config --global --add safe.directory <path>`, replacing `<path>` with the repository's full path.
 
 ## Usage
 
