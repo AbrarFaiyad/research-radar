@@ -1,0 +1,43 @@
+# Copy to config/config.toml (gitignored) and edit.
+
+[paths]
+data_dir = "data"
+field_profile = "config/field_profile.md"
+
+[browser]
+# Playwright MCP server, pinned. Uses its own persistent profile; log in once with `radar login`.
+mcp_command = "npx"
+mcp_args = ["-y", "@playwright/mcp@0.0.84", "--browser", "chromium"]
+headless = false
+feed_url = "https://www.linkedin.com/feed/"
+
+[scan]
+# Human-paced, low-volume defaults. Keep them conservative.
+max_posts = 60
+max_minutes = 10
+scroll_px_min = 600
+scroll_px_max = 1100
+pause_s_min = 2.5
+pause_s_max = 6.0
+stale_steps_stop = 6
+
+[llm]
+host = "http://localhost:11434"
+model = "mimo-v2.6"
+num_ctx = 16384
+timeout_s = 120
+
+[digest]
+max_items = 8
+codex_command = "codex"
+codex_model = ""          # empty = Codex default
+web_search = true
+
+[podcast]
+backend = "sapi"          # "sapi" (Windows built-in voices) or "kokoro" (needs model download)
+host_a_voice = ""         # empty = first available voice
+host_b_voice = ""         # empty = second available voice
+kokoro_model = "data/models/kokoro-v1.0.onnx"
+kokoro_voices = "data/models/voices-v1.0.bin"
+kokoro_voice_a = "af_heart"
+kokoro_voice_b = "am_michael"

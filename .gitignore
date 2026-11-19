@@ -1,0 +1,26 @@
+# Personal data: never commit
+data/
+config/config.toml
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Media and models
+*.wav
+*.mp3
+*.onnx
+voices*.bin
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+.playwright-mcp/
