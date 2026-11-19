@@ -85,6 +85,27 @@ def synthesize_kokoro(lines: list[dict], out_wav: Path, cfg: PodcastCfg, root: P
     return out_wav
 
 
+def wav_to_mp3(wav_path: Path, kbps: int = 64) -> Path | None:
+    """Encode a 16-bit PCM WAV to MP3 (about 0.5 MB per minute at 64 kbps) for email.
+    Returns None if lameenc is not installed."""
+    try:
+        import lameenc
+    except ImportError:
+        return None
+    with wave.open(str(wav_path), "rb") as w:
+        if w.getsampwidth() != 2:
+            return None
+        enc = lameenc.Encoder()
+        enc.set_bit_rate(kbps)
+        enc.set_in_sample_rate(w.getframerate())
+        enc.set_channels(w.getnchannels())
+        enc.set_quality(5)
+        data = enc.encode(w.readframes(w.getnframes())) + enc.flush()
+    mp3 = wav_path.with_suffix(".mp3")
+    mp3.write_bytes(data)
+    return mp3
+
+
 def wav_seconds(path: Path) -> float:
     with wave.open(str(path), "rb") as w:
         return w.getnframes() / float(w.getframerate())
@@ -93,6 +114,9 @@ def wav_seconds(path: Path) -> float:
 def make_synthesizer(cfg: PodcastCfg, root: Path):
     def _synth(lines: list[dict], out_wav: Path) -> Path:
         if cfg.backend == "kokoro":
-            return synthesize_kokoro(lines, out_wav, cfg, root)
-        return synthesize_sapi(lines, out_wav, cfg)
+            wav = synthesize_kokoro(lines, out_wav, cfg, root)
+        else:
+            wav = synthesize_sapi(lines, out_wav, cfg)
+        wav_to_mp3(wav)
+        return wav
     return _synth

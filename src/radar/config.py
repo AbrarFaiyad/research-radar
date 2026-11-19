@@ -60,6 +60,16 @@ class PodcastCfg:
 
 
 @dataclass
+class EmailCfg:
+    enabled: bool = False
+    to: str = ""
+    sender: str = ""          # Gmail account that sends; empty = same as `to`
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    subject_prefix: str = "Research Radar"
+
+
+@dataclass
 class Config:
     root: Path
     data_dir: Path
@@ -69,6 +79,7 @@ class Config:
     llm: LlmCfg
     digest: DigestCfg
     podcast: PodcastCfg
+    email: EmailCfg = field(default_factory=EmailCfg)
 
     @property
     def db_path(self) -> Path:
@@ -114,4 +125,5 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         llm=_section(raw, "llm", LlmCfg),
         digest=_section(raw, "digest", DigestCfg),
         podcast=_section(raw, "podcast", PodcastCfg),
+        email=_section(raw, "email", EmailCfg),
     )

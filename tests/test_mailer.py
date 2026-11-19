@@ -1,0 +1,101 @@
+import datetime as dt
+import wave
+from typing import ClassVar
+
+import pytest
+
+from radar import mailer
+from radar.config import EmailCfg
+from radar.podcast import wav_to_mp3
+
+CFG = EmailCfg(enabled=True, to="me@example.org")
+
+
+def _digest(tmp_path):
+    d = tmp_path / "digests" / "2026-11-19"
+    d.mkdir(parents=True)
+    (d / "summary.md").write_text("# Research digest\n\n**Headline**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+                                  encoding="utf-8")
+    (d / "podcast_script.md").write_text("**A:** hi", encoding="utf-8")
+    (d / "episode.mp3").write_bytes(b"ID3" + b"\0" * 100)
+    q = tmp_path / "queue"
+    q.mkdir()
+    (q / "connect_queue.md").write_text("# Connection queue\n\n| # | Name |\n|---|---|\n| 1 | X |\n",
+                                        encoding="utf-8")
+    (q / "connect_queue.csv").write_text("rank,name\n1,X\n", encoding="utf-8")
+    return d, q
+
+
+def test_compose_daily_body_and_attachments(tmp_path):
+    d, q = _digest(tmp_path)
+    msg = mailer.compose_daily(CFG, d, q, today=dt.date(2026, 11, 19))
+    assert msg["Subject"] == "Research Radar 2026-11-19"
+    assert msg["To"] == msg["From"] == "me@example.org"
+    names = [p.get_filename() for p in msg.iter_attachments()]
+    assert names == ["episode.mp3", "podcast_script.md", "summary.md", "connect_queue.csv"]
+    html = msg.get_body(("html",)).get_content()
+    assert "<table>" in html and "Connection queue" in html
+
+
+def test_compose_without_digest_still_sends_queue(tmp_path):
+    _, q = _digest(tmp_path)
+    msg = mailer.compose_daily(CFG, None, q, today=dt.date(2026, 11, 19))
+    assert "No new saved posts" in msg.get_body(("plain",)).get_content()
+    assert [p.get_filename() for p in msg.iter_attachments()] == ["connect_queue.csv"]
+
+
+def test_oversize_files_are_listed_not_attached(tmp_path):
+    big, small = tmp_path / "big.wav", tmp_path / "small.md"
+    big.write_bytes(b"0" * 200)
+    small.write_bytes(b"0" * 10)
+    attached, notes = mailer.pick_attachments([big, small, tmp_path / "missing.md"], limit=100)
+    assert attached == [small]
+    assert len(notes) == 1 and "big.wav" in notes[0]
+
+
+class FakeSMTP:
+    sent: ClassVar[list] = []
+
+    def __init__(self, host, port, timeout):
+        self.host, self.port = host, port
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def starttls(self, context):
+        self.tls = True
+
+    def login(self, user, password):
+        self.login_args = (user, password)
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append((self.host, self.port, self.login_args, self.tls, msg["To"]))
+
+
+def test_send_uses_tls_and_stored_password(monkeypatch, tmp_path):
+    monkeypatch.setattr(mailer, "get_password", lambda user: "app-pass" if user == "me@example.org" else None)
+    d, q = _digest(tmp_path)
+    mailer.send(CFG, mailer.compose_daily(CFG, d, q), smtp_factory=FakeSMTP)
+    assert FakeSMTP.sent[-1] == ("smtp.gmail.com", 587, ("me@example.org", "app-pass"), True,
+                                 "me@example.org")
+
+
+def test_send_without_password_explains_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(mailer, "get_password", lambda user: None)
+    with pytest.raises(RuntimeError, match="radar email-setup"):
+        mailer.send(CFG, mailer.build_message(CFG, "s", "b", []), smtp_factory=FakeSMTP)
+
+
+def test_wav_to_mp3_shrinks_audio(tmp_path):
+    wav = tmp_path / "e.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(22050)
+        w.writeframes(b"\x00\x10" * 22050 * 3)
+    mp3 = wav_to_mp3(wav)
+    assert mp3 is not None and mp3.suffix == ".mp3"
+    assert 0 < mp3.stat().st_size < wav.stat().st_size / 4

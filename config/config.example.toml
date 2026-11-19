@@ -43,3 +43,14 @@ kokoro_model = "data/models/kokoro-v1.0.onnx"
 kokoro_voices = "data/models/voices-v1.0.bin"
 kokoro_voice_a = "af_heart"
 kokoro_voice_b = "am_michael"
+
+[email]
+# Daily email with the digest, queue, script, and podcast MP3. Put your real address only in
+# config/config.toml (gitignored). The Gmail App Password goes in the OS credential store via
+# `radar email-setup`, never in this file.
+enabled = false
+to = "you@example.com"
+sender = ""               # Gmail account that sends; empty = same as `to`
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
+subject_prefix = "Research Radar"

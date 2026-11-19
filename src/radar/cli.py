@@ -1,4 +1,4 @@
-"""Command line: radar login | scan | reclassify | queue | digest | podcast | daily | demo | status."""
+"""Command line: radar login | scan | reclassify | queue | digest | podcast | email | daily | demo | status."""
 
 from __future__ import annotations
 
@@ -102,11 +102,50 @@ def cmd_podcast(cfg, args) -> int:
     return 0
 
 
+def cmd_email_setup(cfg, args) -> int:
+    import getpass
+
+    from .mailer import set_password
+    user = cfg.email.sender or cfg.email.to
+    if not user or user.endswith("example.com"):
+        sys.exit("Set [email] to (and optionally sender) in config/config.toml first.")
+    print(f"Paste the Gmail App Password for {user} (input is hidden).")
+    pw = getpass.getpass("App Password: ").replace(" ", "")
+    if not pw:
+        sys.exit("No password entered.")
+    set_password(user, pw)
+    print("Saved in Windows Credential Manager. Test with `radar email`.")
+    return 0
+
+
+def _latest_digest(cfg, today_only: bool):
+    folders = sorted((p for p in cfg.digests_dir.glob("*") if (p / "summary.md").exists()),
+                     key=lambda p: p.stat().st_mtime)
+    if today_only:
+        folders = [p for p in folders if p.name.startswith(dt.date.today().isoformat())]
+    return folders[-1] if folders else None
+
+
+def cmd_email(cfg, args) -> int:
+    from .mailer import compose_daily, send
+    if not cfg.email.to or cfg.email.to.endswith("example.com"):
+        sys.exit("Set [email] to in config/config.toml first.")
+    folder = cfg.digests_dir / args.folder if args.folder else _latest_digest(cfg, args.today_only)
+    msg = compose_daily(cfg.email, folder, cfg.queue_dir)
+    send(cfg.email, msg)
+    names = [p.get_filename() for p in msg.iter_attachments()]
+    print(f"email sent to {cfg.email.to}: {msg['Subject']} (attachments: {', '.join(names) or 'none'})")
+    return 0
+
+
 def cmd_daily(cfg, args) -> int:
     rc = cmd_scan(cfg, argparse.Namespace(from_file=None, max_posts=None))
     if rc:
         return rc
-    return cmd_digest(cfg, argparse.Namespace(no_llm=False, no_audio=False))
+    rc = cmd_digest(cfg, argparse.Namespace(no_llm=False, no_audio=False))
+    if rc == 0 and cfg.email.enabled:
+        rc = cmd_email(cfg, argparse.Namespace(folder=None, today_only=True))
+    return rc
 
 
 def cmd_demo(cfg, args) -> int:
@@ -165,7 +204,12 @@ def main(argv: list[str] | None = None) -> int:
     pc = sub.add_parser("podcast", help="rebuild episode.wav for a finished digest")
     pc.add_argument("folder", nargs="?", help="digest folder name, e.g. 2026-11-19 (default: latest)")
 
-    sub.add_parser("daily", help="scan then digest (what the scheduled task runs)")
+    sub.add_parser("email-setup", help="store the Gmail App Password in the OS credential store")
+    em = sub.add_parser("email", help="email the latest digest, queue, and podcast to yourself")
+    em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
+    em.add_argument("--today-only", action="store_true", help="skip digests from earlier days")
+
+    sub.add_parser("daily", help="scan, digest, then email if enabled (the scheduled task)")
     sub.add_parser("demo", help="offline demo on synthetic posts")
     sub.add_parser("status", help="show database counts")
 
@@ -174,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         cfg.data_dir = args.data_dir.resolve()
     handlers = {"login": cmd_login, "scan": cmd_scan, "reclassify": cmd_reclassify, "queue": cmd_queue, "digest": cmd_digest,
-                "podcast": cmd_podcast, "daily": cmd_daily, "demo": cmd_demo,
+                "podcast": cmd_podcast, "email-setup": cmd_email_setup, "email": cmd_email,
+                "daily": cmd_daily, "demo": cmd_demo,
                 "status": cmd_status}
     return handlers[args.cmd](cfg, args)
 

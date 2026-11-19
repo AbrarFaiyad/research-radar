@@ -7,6 +7,7 @@ Keeping up with AI-for-materials research takes time, and a LinkedIn feed mixes 
 - Scans the LinkedIn feed and classifies posts against a field profile.
 - Exports a queue of authors to consider connecting with. The owner sends each request by hand.
 - Curates saved posts into a daily Codex-researched digest and a two-host podcast audio file.
+- Emails the digest, queue, script, and podcast MP3 to the owner each day.
 
 ## Architecture
 
@@ -193,6 +194,28 @@ uv pip install -p .venv -e ".[kokoro]"
 ```
 
 Download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from the [kokoro-onnx GitHub releases](https://github.com/thewh1teagle/kokoro-onnx/releases) and place them in `data/models/`. Set `backend = "kokoro"` in the `[podcast]` section of `config/config.toml`.
+
+## Daily email
+
+`radar daily` ends by emailing the day's digest to you when `[email] enabled = true`. The message body holds the digest and the connection queue. The attachments are `episode.mp3`, `podcast_script.md`, `summary.md`, and `connect_queue.csv`. The podcast is encoded to MP3 at 64 kbps, about 0.5 MB per minute, because Gmail limits a message to 25 MB. A file that would push the message past the limit is listed with its local path instead of attached.
+
+Email goes out through Gmail SMTP with an App Password. An App Password is a 16-character password that Google issues for one app; it requires 2-Step Verification on the account.
+
+1. Create one at <https://myaccount.google.com/apppasswords>.
+2. Set `to` (and `sender`, if a different Gmail account sends) under `[email]` in `config/config.toml`.
+3. Store the password in Windows Credential Manager. The prompt hides your input, and the password never touches the repository or config files.
+
+```powershell
+radar email-setup
+```
+
+4. Send a test with the latest digest:
+
+```powershell
+radar email
+```
+
+To revoke access, delete the App Password in your Google account.
 
 ## Customizing the field
 
