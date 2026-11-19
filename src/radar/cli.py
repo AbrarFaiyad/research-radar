@@ -75,6 +75,21 @@ def cmd_digest(cfg, args) -> int:
     return 0
 
 
+def cmd_podcast(cfg, args) -> int:
+    """Re-run text-to-speech for a finished digest (for example after a TTS failure)."""
+    from .digest import resynthesize
+    from .podcast import make_synthesizer, wav_seconds
+    folders = sorted((p for p in cfg.digests_dir.glob("*") if (p / "codex_result.json").exists()),
+                     key=lambda p: p.stat().st_mtime)
+    if args.folder:
+        folders = [cfg.digests_dir / args.folder]
+    if not folders or not (folders[-1] / "codex_result.json").exists():
+        sys.exit("No finished digest found.")
+    out = resynthesize(folders[-1], make_synthesizer(cfg.podcast, cfg.root))
+    print(f"audio: {out} ({wav_seconds(out) / 60:.1f} min)")
+    return 0
+
+
 def cmd_daily(cfg, args) -> int:
     rc = cmd_scan(cfg, argparse.Namespace(from_file=None, max_posts=None))
     if rc:
@@ -133,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--no-llm", action="store_true", help="skip local curation, rank by rules")
     d.add_argument("--no-audio", action="store_true")
 
+    pc = sub.add_parser("podcast", help="rebuild episode.wav for a finished digest")
+    pc.add_argument("folder", nargs="?", help="digest folder name, e.g. 2026-11-19 (default: latest)")
+
     sub.add_parser("daily", help="scan then digest (what the scheduled task runs)")
     sub.add_parser("demo", help="offline demo on synthetic posts")
     sub.add_parser("status", help="show database counts")
@@ -142,7 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         cfg.data_dir = args.data_dir.resolve()
     handlers = {"login": cmd_login, "scan": cmd_scan, "queue": cmd_queue, "digest": cmd_digest,
-                "daily": cmd_daily, "demo": cmd_demo, "status": cmd_status}
+                "podcast": cmd_podcast, "daily": cmd_daily, "demo": cmd_demo,
+                "status": cmd_status}
     return handlers[args.cmd](cfg, args)
 
 

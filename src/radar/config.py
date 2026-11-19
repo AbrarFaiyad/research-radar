@@ -41,6 +41,7 @@ class LlmCfg:
 @dataclass
 class DigestCfg:
     max_items: int = 8
+    backlog_days: float = 3
     codex_command: str = "codex"
     codex_model: str = ""
     web_search: bool = True

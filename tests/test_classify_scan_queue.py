@@ -38,9 +38,9 @@ def test_scan_file_classifies_dedupes_and_builds_queue(cfg, store, fake_model):
     from tests.conftest import FIXTURES
     classify = Classifier(fake_model, cfg.field_profile_text())
     rep = scan_file(FIXTURES / "feed_sample.json", store, classify, log=lambda s: None)
-    # 8 cards, last one is a text duplicate of the first.
-    assert rep.seen == 8
-    assert rep.duplicates == 1
+    # 8 cards; the last repeats the first card's text under a new key, dropped at collection.
+    assert rep.seen == 7
+    assert rep.duplicates == 0
     assert rep.saved == 4          # molten salt, HPC, MoS2 (1st degree), dataset (company)
     assert rep.skipped == 3        # ad, milestone, unrelated
     assert store.stats() == {"core": 3, "adjacent": 1, "skip": 3}
@@ -65,6 +65,38 @@ def test_queue_mark_and_export(cfg, store, fake_model, tmp_path):
     assert "Dana Example" not in text
     _, _, n_all = write_queue(store, tmp_path, include_done=True)
     assert n_all == 2
+
+
+def test_resighting_updates_degree_and_kind(store, fake_model):
+    from tests.conftest import FIXTURES
+    scan_file(FIXTURES / "feed_sample.json", store, Classifier(fake_model, "p"), log=lambda s: None)
+    assert "Dana Example" in [r["name"] for r in queue_records(store)]
+    # Same post seen again after the user connected: author leaves the queue.
+    again = RawPost.from_dict({
+        "key": "new-key", "author": "Dana Example",
+        "authorUrl": "https://www.linkedin.com/in/dana-example-000/", "authorKind": "unknown",
+        "degree": "1st",
+        "text": json_text_of(FIXTURES, "k-core-mlip"),
+    })
+    rep = process_posts([again], store, Classifier(fake_model, "p"), resolve=lambda u, t: [],
+                        log=lambda s: None)
+    assert rep.duplicates == 1
+    assert "Dana Example" not in [r["name"] for r in queue_records(store)]
+    kind = store.conn.execute("SELECT kind FROM authors WHERE name='Dana Example'").fetchone()[0]
+    assert kind == "person"                                 # 'unknown' never overwrites
+
+
+def json_text_of(fixtures, key):
+    import json
+    recs = json.loads((fixtures / "feed_sample.json").read_text(encoding="utf-8"))
+    return next(r["text"] for r in recs if r["key"] == key)
+
+
+def test_collector_dedupes_same_text_under_new_key():
+    from radar.scanner import Collector
+    c = Collector()
+    assert c.add([{"key": "a", "author": "X", "text": "same words here"}]) == 1
+    assert c.add([{"key": "b", "author": "X", "text": "same  words here"}]) == 0
 
 
 def test_process_posts_records_model_errors(store):
@@ -99,7 +131,7 @@ def test_collect_feed_dedupes_and_stops_when_stale(feed_records):
 
     cfg = ScanCfg(max_posts=100, max_minutes=60, stale_steps_stop=2, pause_s_min=2.5, pause_s_max=6.0)
     posts = _run(collect_feed(evaluate, wait, cfg, rng=random.Random(0)))
-    assert [p.key for p in posts] == [r["key"] for r in feed_records]
+    assert [p.key for p in posts] == [r["key"] for r in feed_records if r["key"] != "k-core-mlip-dup"]
     assert calls["extract"] == 5            # 3 productive pages + 2 stale
     assert all(2.5 <= w <= 6.0 for w in calls["wait"])
 

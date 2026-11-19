@@ -60,16 +60,18 @@ class Collector:
 
     def __init__(self) -> None:
         self.keys: set[str] = set()
+        self.hashes: set[str] = set()
         self.posts: list[RawPost] = []
 
     def add(self, records: Iterable[dict]) -> int:
         added = 0
         for rec in records or []:
             post = RawPost.from_dict(rec)
-            k = post.key or post.text_hash
-            if k in self.keys:
+            if (post.key and post.key in self.keys) or post.text_hash in self.hashes:
                 continue
-            self.keys.add(k)
+            if post.key:
+                self.keys.add(post.key)
+            self.hashes.add(post.text_hash)
             self.posts.append(post)
             added += 1
         return added
@@ -110,6 +112,7 @@ def process_posts(posts: list[RawPost], store: Store, classify: Classifier,
     for post in posts:
         if store.has_post(post):
             rep.duplicates += 1
+            store.upsert_author(post)  # pick up degree changes on re-sightings
             continue
         rep.new += 1
         try:

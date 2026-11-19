@@ -102,6 +102,24 @@ def test_run_digest_end_to_end_with_fakes(cfg, store):
     assert run_digest(cfg, store, FakeModel(), runner=runner, log=lambda s: None) is None
 
 
+def test_unpicked_posts_carry_over_and_folders_never_collide(cfg, store):
+    _seed(store)
+    rows = store.saved_posts(undigested_only=True)
+
+    def runner(cmd, task):
+        with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as f:
+            json.dump(FAKE_RESULT, f)
+
+    one = FakeModel(curate_items=[{"post_id": rows[0]["id"], "title": "t", "why": "w"}])
+    first = run_digest(cfg, store, one, runner=runner, log=lambda s: None, today=TODAY)
+    left = store.saved_posts(undigested_only=True)
+    assert len(left) == len(rows) - 1                      # unpicked posts stay eligible
+    second = run_digest(cfg, store, FakeModel(), runner=runner, log=lambda s: None, today=TODAY)
+    assert first.folder.name == "2026-11-19"
+    assert second.folder.name == "2026-11-19-2"             # same day, new folder
+    assert (first.folder / "summary.md").exists()
+
+
 def test_render_markdown_lists_selection():
     from radar.models import DigestItem
     md = render_markdown(FAKE_RESULT, "2026-11-19", [DigestItem(1, "T", [], "why")])

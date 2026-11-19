@@ -124,7 +124,13 @@ Replace `<profile_url>` with the author’s URL after sending a request. `skip`,
 radar digest
 ```
 
-Curate undigested saved posts, run Codex research and produce the written digest and audio. If there are no new saved posts, the command has nothing to process.
+Curate undigested saved posts, run Codex research and produce the written digest and audio. Saved posts that curation does not pick stay eligible for three days (`backlog_days`), then age out. A second run on the same day writes to a new folder, such as `2026-11-19-2`.
+
+```powershell
+radar podcast
+```
+
+Rebuild `episode.wav` for the latest digest from its saved Codex result, for example after a text-to-speech failure. Pass a folder name to pick another digest.
 
 ```powershell
 radar daily

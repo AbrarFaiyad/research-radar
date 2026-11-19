@@ -37,11 +37,16 @@ def test_resolve_follows_redirect_and_interstitial():
             html = ('<a data-tracking-control-name="external_url_click" '
                     'href="https://doi.org/10.1/x?a=1&amp;b=2">go</a>')
             return httpx.Response(200, text=html)
+        if request.url.path == "/reordered":
+            html = ("<abbr>x</abbr><a class='btn' href='https://arxiv.org/abs/2611.00002?q=a&#38;b' "
+                    "data-tracking-control-name='external_url_click'>go</a>")
+            return httpx.Response(200, text=html)
         return httpx.Response(200, text="ok")
 
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
     assert links.resolve("https://lnkd.in/redirect", client=client) == "https://arxiv.org/abs/2611.00001"
     assert links.resolve("https://lnkd.in/interstitial", client=client) == "https://doi.org/10.1/x?a=1&b=2"
+    assert links.resolve("https://lnkd.in/reordered", client=client) == "https://arxiv.org/abs/2611.00002?q=a&b"
     # Non-short links are returned untouched without a request.
     assert links.resolve("https://example.org/a", client=client) == "https://example.org/a"
 

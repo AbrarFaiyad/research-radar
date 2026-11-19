@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -56,7 +57,18 @@ def ids_in_text(text: str) -> list[str]:
     return out
 
 
-_LNKD_INTERSTITIAL = re.compile(r'<a[^>]+data-tracking-control-name="external_url_click"[^>]+href="([^"]+)"', re.IGNORECASE)
+_ANCHOR = re.compile(r"<a\b[^>]*>", re.IGNORECASE)
+_HREF = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+
+
+def _interstitial_target(page: str) -> str | None:
+    """Find the external link on a lnkd.in warning page, whatever the attribute order."""
+    for tag in _ANCHOR.findall(page):
+        if "external_url_click" in tag:
+            m = _HREF.search(tag)
+            if m:
+                return html.unescape(m.group(1))
+    return None
 
 
 def resolve(url: str, client: httpx.Client | None = None, timeout: float = 10.0) -> str:
@@ -75,9 +87,9 @@ def resolve(url: str, client: httpx.Client | None = None, timeout: float = 10.0)
         r = client.get(url)
         final = str(r.url)
         if urlparse(final).netloc.endswith("lnkd.in") or "linkedin.com" in urlparse(final).netloc:
-            m = _LNKD_INTERSTITIAL.search(r.text)
-            if m:
-                return m.group(1).replace("&amp;", "&")
+            target = _interstitial_target(r.text)
+            if target:
+                return target
         return final
     except httpx.HTTPError:
         return url

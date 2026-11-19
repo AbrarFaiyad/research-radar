@@ -51,12 +51,14 @@ def synthesize_sapi(lines: list[dict], out_wav: Path, cfg: PodcastCfg) -> Path:
         lines_path.write_text(json.dumps(clean_lines(lines)), encoding="utf-8")
         ps_path = Path(tmp) / "speak.ps1"
         ps_path.write_text(SAPI_PS, encoding="utf-8-sig")
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_path),
-             "-LinesPath", str(lines_path), "-OutPath", str(out_wav),
-             "-VoiceA", cfg.host_a_voice, "-VoiceB", cfg.host_b_voice],
-            capture_output=True, text=True, timeout=1800, check=False,
-        )
+        args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_path),
+                "-LinesPath", str(lines_path), "-OutPath", str(out_wav.resolve())]
+        # Empty strings do not bind reliably under Windows PowerShell 5.1; omit them.
+        if cfg.host_a_voice:
+            args += ["-VoiceA", cfg.host_a_voice]
+        if cfg.host_b_voice:
+            args += ["-VoiceB", cfg.host_b_voice]
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=1800, check=False)
     if proc.returncode != 0 or not out_wav.exists():
         raise RuntimeError(f"SAPI synthesis failed: {proc.stderr[-1000:]}")
     return out_wav

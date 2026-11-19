@@ -192,7 +192,8 @@ def run_digest(cfg: Config, store: Store, model: ChatModel | None,
                log: Callable[[str], None] = print,
                today: dt.date | None = None) -> DigestResult | None:
     today = today or dt.date.today()
-    rows = store.saved_posts(undigested_only=True)
+    # Unpicked posts stay eligible for a few days, then age out instead of piling up.
+    rows = store.saved_posts(undigested_only=True, since_days=cfg.digest.backlog_days)
     if not rows:
         log("No new saved posts since the last digest.")
         return None
@@ -203,8 +204,7 @@ def run_digest(cfg: Config, store: Store, model: ChatModel | None,
         return None
     log(f"curated {len(items)} of {len(rows)} saved posts")
 
-    folder = cfg.digests_dir / today.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = unique_folder(cfg.digests_dir, today.isoformat())
     rows_by_id = {r["id"]: _post_view(r) for r in rows}
     template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
     task = build_codex_task(items, rows_by_id, profile, template, today=today)
@@ -223,13 +223,28 @@ def run_digest(cfg: Config, store: Store, model: ChatModel | None,
     script_md.write_text("\n\n".join(f"**{ln['speaker']}:** {ln['text']}" for ln in result["podcast"]),
                          encoding="utf-8")
 
+    # Record the digest before audio, so a TTS failure never causes a second Codex run.
+    store.record_digest(today.isoformat(), str(folder), [it.post_id for it in items])
+
     audio = None
     if synthesize is not None and result.get("podcast"):
         try:
             audio = synthesize(result["podcast"], folder / "episode.wav")
         except Exception as e:  # noqa: BLE001 - audio is optional; the written digest stands
-            log(f"audio synthesis failed: {e}")
-
-    # Every undigested saved post is now accounted for, picked or not.
-    store.record_digest(today.isoformat(), str(folder), [r["id"] for r in rows])
+            log(f"audio synthesis failed: {e}. Retry with `radar podcast {folder.name}`.")
     return DigestResult(folder, summary_md, audio, items)
+
+
+def unique_folder(base: Path, name: str) -> Path:
+    """data/digests/2026-11-19, then 2026-11-19-2, ... so a second run never overwrites."""
+    folder, n = base / name, 2
+    while folder.exists():
+        folder, n = base / f"{name}-{n}", n + 1
+    folder.mkdir(parents=True)
+    return folder
+
+
+def resynthesize(folder: Path, synthesize: Callable[[list[dict], Path], Path | None]) -> Path | None:
+    """Rebuild episode.wav from a finished digest's codex_result.json."""
+    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
+    return synthesize(result["podcast"], folder / "episode.wav")

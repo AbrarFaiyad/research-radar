@@ -29,6 +29,7 @@ timeout_s = 120
 
 [digest]
 max_items = 8
+backlog_days = 3          # saved posts not picked stay eligible this many days
 codex_command = "codex"
 codex_model = ""          # empty = Codex default
 web_search = true

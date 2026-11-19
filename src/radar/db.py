@@ -82,30 +82,45 @@ class Store:
                 verdict.summary, verdict.reason, now,
             ),
         )
-        if post.author_url:
-            self.conn.execute(
-                """INSERT INTO authors (url, name, kind, headline, degree, first_seen, last_seen)
-                   VALUES (?,?,?,?,?,?,?)
-                   ON CONFLICT(url) DO UPDATE SET
-                     name = excluded.name,
-                     headline = COALESCE(excluded.headline, authors.headline),
-                     degree = COALESCE(excluded.degree, authors.degree),
-                     last_seen = excluded.last_seen,
-                     status = CASE WHEN excluded.degree = '1st' THEN 'connected'
-                                   ELSE authors.status END""",
-                (post.author_url, post.author, post.author_kind, post.headline, post.degree, now, now),
-            )
-            if post.degree == "1st":
-                self.conn.execute("UPDATE authors SET status='connected' WHERE url=?", (post.author_url,))
+        self.upsert_author(post, commit=False)
         self.conn.commit()
         return cur.lastrowid if cur.rowcount else None
 
-    def saved_posts(self, undigested_only: bool = False) -> list[sqlite3.Row]:
+    def upsert_author(self, post: RawPost, commit: bool = True) -> None:
+        """Insert or refresh the post's author. A 1st-degree sighting marks them connected.
+        Called for duplicate posts too, so degree changes are picked up on re-sightings."""
+        if not post.author_url:
+            return
+        now = _now()
+        self.conn.execute(
+            """INSERT INTO authors (url, name, kind, headline, degree, first_seen, last_seen, status)
+               VALUES (?,?,?,?,?,?,?, CASE WHEN ? = '1st' THEN 'connected' ELSE 'todo' END)
+               ON CONFLICT(url) DO UPDATE SET
+                 name = COALESCE(excluded.name, authors.name),
+                 kind = CASE WHEN excluded.kind <> 'unknown' THEN excluded.kind ELSE authors.kind END,
+                 headline = COALESCE(excluded.headline, authors.headline),
+                 degree = COALESCE(excluded.degree, authors.degree),
+                 last_seen = excluded.last_seen,
+                 status = CASE WHEN excluded.degree = '1st' THEN 'connected'
+                               ELSE authors.status END""",
+            (post.author_url, post.author, post.author_kind, post.headline, post.degree, now, now,
+             post.degree),
+        )
+        if commit:
+            self.conn.commit()
+
+    def saved_posts(self, undigested_only: bool = False,
+                    since_days: float | None = None) -> list[sqlite3.Row]:
         q = "SELECT * FROM posts WHERE tier IN ('core','adjacent')"
+        params: list[str] = []
         if undigested_only:
             q += " AND digest_id IS NULL"
+        if since_days is not None:
+            cutoff = dt.datetime.now() - dt.timedelta(days=since_days)
+            q += " AND seen_at >= ?"
+            params.append(cutoff.isoformat(timespec="seconds"))
         q += " ORDER BY CASE tier WHEN 'core' THEN 0 ELSE 1 END, seen_at DESC"
-        return self.conn.execute(q).fetchall()
+        return self.conn.execute(q, params).fetchall()
 
     def stats(self) -> dict:
         rows = self.conn.execute("SELECT tier, COUNT(*) n FROM posts GROUP BY tier").fetchall()
