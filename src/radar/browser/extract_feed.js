@@ -1,5 +1,5 @@
 async () => {
-  // Reads the feed cards currently in the DOM. The LinkedIn feed is virtualized, so the
+  // Reads the feed cards currently in the DOM. Cards load lazily as the feed scrolls, so the
   // scanner calls this after every scroll step and dedupes by `key`.
   // Read-only except for expanding "… more" inside a post body, which changes nothing
   // on the account.
@@ -41,13 +41,27 @@ async () => {
       ? menu.getAttribute("aria-label").replace("Open control menu for post by ", "").trim()
       : null;
 
-    const profileLinks = [...c.querySelectorAll('a[href*="/in/"], a[href*="/company/"], a[href*="/school/"]')]
-      .map((a) => a.href.split("?")[0]);
-    const authorUrl = profileLinks[0] || null;
+    // Cards can open with "Followed by X" or "X commented", whose profile link comes first.
+    // Pick the link whose label, text, or image alt names the post author.
+    const anchors = [...c.querySelectorAll('a[href*="/in/"], a[href*="/company/"], a[href*="/school/"], a[href*="/showcase/"]')];
+    const labelOf = (a) => [
+      a.getAttribute("aria-label") || "",
+      a.innerText || "",
+      (a.querySelector("img") && a.querySelector("img").alt) || "",
+    ].join(" ").toLowerCase();
+    let authorA = null;
+    if (author) {
+      const full = author.toLowerCase();
+      const head = full.split(/[,|(]/)[0].trim();
+      authorA = anchors.find((a) => labelOf(a).includes(full)) ||
+        anchors.find((a) => head && labelOf(a).includes(head)) || null;
+    }
+    // No name match: leave the URL empty rather than risk queueing the wrong person.
+    const authorUrl = authorA ? authorA.href.split("?")[0] : null;
     let authorKind = "unknown";
     if (authorUrl) {
       if (authorUrl.includes("/in/")) authorKind = "person";
-      else if (authorUrl.includes("/company/")) authorKind = "company";
+      else if (authorUrl.includes("/company/") || authorUrl.includes("/showcase/")) authorKind = "company";
       else if (authorUrl.includes("/school/")) authorKind = "school";
     }
 

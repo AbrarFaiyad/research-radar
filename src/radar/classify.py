@@ -27,9 +27,12 @@ Decide whether each post reports informative scientific progress in the reader's
 
 Rules:
 - tier "core": the post's main content is a paper, preprint, dataset, model, tool, or concrete result in a Core area.
-- tier "adjacent": same standard, but in an Adjacent area.
+- tier "adjacent": a paper, preprint, tool, system, or concrete result in an Adjacent area. Apply the
+  Adjacent list generously: new HPC or AI-for-science computing resources, scientific-computing tools,
+  and scientific studies of AI agents all qualify even when they are not about materials.
 - tier "skip": everything else, including ads, business news, unrelated fields, and personal milestones
   (graduations, defenses, new jobs, awards, congratulations) that do not themselves report a result.
+  An award or workshop post that describes the new technical work behind it is not a milestone; judge the work.
 - Event or talk announcements count only if they describe specific new technical work in the field.
 - Dates up to today are valid; do not reject a post because a paper or arXiv id looks recent.
 - summary: one plain sentence on what was done or found. reason: one short clause on why this tier.

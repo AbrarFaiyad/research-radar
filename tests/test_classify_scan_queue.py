@@ -92,6 +92,38 @@ def json_text_of(fixtures, key):
     return next(r["text"] for r in recs if r["key"] == key)
 
 
+def test_reclassify_upgrades_and_resolves_links(store, fake_model):
+    from radar.scanner import reclassify_stored
+    from tests.conftest import EXPECTED
+    post = RawPost.from_dict({"key": "r", "author": "Lee Placeholder", "authorKind": "person",
+                              "authorUrl": "https://www.linkedin.com/in/lee-placeholder-000/",
+                              "degree": "2nd", "text": "Our SC paper on 10,000 GPUs " + "x" * 50,
+                              "links": ["https://lnkd.in/abc"]})
+    process_posts([post], store, Classifier(_Fixed("skip"), "p"), resolve=lambda u, t: [],
+                  log=lambda s: None)
+    assert store.stats() == {"skip": 1}
+    seen = {}
+
+    def resolve(urls, text):
+        seen["urls"] = urls
+        return [{"url": "https://arxiv.org/abs/2611.1", "kind": "arxiv"}]
+
+    checked, changed = reclassify_stored(store, Classifier(fake_model, "p"), resolve=resolve,
+                                         log=lambda s: None)
+    assert (checked, changed) == (1, 1)
+    assert store.stats() == {EXPECTED["10,000 GPUs"]["tier"]: 1}
+    assert seen["urls"] == ["https://lnkd.in/abc"]
+    assert [r["name"] for r in queue_records(store)] == ["Lee Placeholder"]
+
+
+class _Fixed:
+    def __init__(self, tier):
+        self.tier = tier
+
+    def json_chat(self, system, user, schema):
+        return {"tier": self.tier, "kind": "other", "topics": [], "summary": "s", "reason": "r"}
+
+
 def test_collector_dedupes_same_text_under_new_key():
     from radar.scanner import Collector
     c = Collector()

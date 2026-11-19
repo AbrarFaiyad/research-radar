@@ -1,4 +1,4 @@
-"""Command line: radar login | scan | queue | digest | daily | demo | status."""
+"""Command line: radar login | scan | reclassify | queue | digest | podcast | daily | demo | status."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from .llm import OllamaModel
 
 
 def _model(cfg):
-    m = OllamaModel(cfg.llm.host, cfg.llm.model, cfg.llm.num_ctx, cfg.llm.timeout_s)
+    m = OllamaModel(cfg.llm.host, cfg.llm.model, cfg.llm.num_ctx, cfg.llm.timeout_s,
+                    think=cfg.llm.think)
     if not m.available():
         sys.exit(f"Ollama model {cfg.llm.model!r} not reachable at {cfg.llm.host}. "
                  f"Start Ollama and run `ollama pull {cfg.llm.model}`.")
@@ -43,6 +44,17 @@ def cmd_scan(cfg, args) -> int:
     for e in rep.errors:
         print("  error:", e)
     from .queue import write_queue
+    md, _, n = write_queue(store, cfg.queue_dir)
+    print(f"queue: {n} people -> {md}")
+    return 0
+
+
+def cmd_reclassify(cfg, args) -> int:
+    from .queue import write_queue
+    from .scanner import reclassify_stored
+    store = Store(cfg.db_path)
+    checked, changed = reclassify_stored(store, Classifier(_model(cfg), cfg.field_profile_text()))
+    print(f"reclassify: checked {checked}, changed {changed}")
     md, _, n = write_queue(store, cfg.queue_dir)
     print(f"queue: {n} people -> {md}")
     return 0
@@ -138,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--from-file", help="process extractor-shaped JSON instead of the live feed")
     s.add_argument("--max-posts", type=int)
 
+    sub.add_parser("reclassify", help="re-judge stored posts after editing the field profile")
+
     q = sub.add_parser("queue", help="export or update the connection queue")
     q.add_argument("action", nargs="?", default="export", choices=["export", "mark"])
     q.add_argument("target", nargs="?")
@@ -159,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     if args.data_dir:
         cfg.data_dir = args.data_dir.resolve()
-    handlers = {"login": cmd_login, "scan": cmd_scan, "queue": cmd_queue, "digest": cmd_digest,
+    handlers = {"login": cmd_login, "scan": cmd_scan, "reclassify": cmd_reclassify, "queue": cmd_queue, "digest": cmd_digest,
                 "podcast": cmd_podcast, "daily": cmd_daily, "demo": cmd_demo,
                 "status": cmd_status}
     return handlers[args.cmd](cfg, args)

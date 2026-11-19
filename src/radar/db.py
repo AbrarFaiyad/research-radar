@@ -109,6 +109,16 @@ class Store:
         if commit:
             self.conn.commit()
 
+    def update_verdict(self, post_id: int, verdict: Verdict, links: list[dict] | None = None) -> None:
+        sets = "tier=?, kind=?, topics=?, summary=?, reason=?"
+        vals: list = [verdict.tier, verdict.kind, json.dumps(verdict.topics), verdict.summary,
+                      verdict.reason]
+        if links is not None:
+            sets += ", links=?"
+            vals.append(json.dumps(links))
+        self.conn.execute(f"UPDATE posts SET {sets} WHERE id=?", [*vals, post_id])
+        self.conn.commit()
+
     def saved_posts(self, undigested_only: bool = False,
                     since_days: float | None = None) -> list[sqlite3.Row]:
         q = "SELECT * FROM posts WHERE tier IN ('core','adjacent')"

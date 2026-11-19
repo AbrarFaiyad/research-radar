@@ -13,19 +13,21 @@ class ChatModel(Protocol):
 
 
 class OllamaModel:
-    def __init__(self, host: str, model: str, num_ctx: int = 16384, timeout_s: float = 120):
+    def __init__(self, host: str, model: str, num_ctx: int = 16384, timeout_s: float = 120,
+                 think: bool = False):
         self.host = host.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx
         self.timeout_s = timeout_s
+        self.think = think
 
     def json_chat(self, system: str, user: str, schema: dict) -> dict:
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": False,
-            "think": False,
+            "think": self.think,
             "format": schema,
-            "options": {"temperature": 0.1, "num_ctx": self.num_ctx},
+            "options": {"temperature": 0, "num_ctx": self.num_ctx},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

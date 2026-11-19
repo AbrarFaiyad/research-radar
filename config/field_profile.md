@@ -14,7 +14,7 @@ The reader is a mechanical engineering PhD candidate in computational materials 
 
 - HPC and exascale computing for science: ALCF, Aurora, Polaris, SC conferences, GPU scaling.
 - Scientific machine learning: neural operators, reduced-order models, physics-informed ML.
-- AI agents for science, self-driving labs, AI coding agents studied scientifically.
+- AI agents for science, self-driving labs, and scientific studies of AI agents themselves (for example, a preprint measuring how coding agents spend tokens or fail).
 - AI accelerators for scientific computing.
 
 ## Skip
@@ -22,6 +22,7 @@ The reader is a mechanical engineering PhD candidate in computational materials 
 - Promoted or sponsored posts, LinkedIn News, ads.
 - General AI business news (funding, stock prices, executive moves).
 - Unrelated fields (for example computer vision security, wireless networks, energy markets) unless the post applies AI to materials or chemistry.
+- Biology and drug-discovery AI (protein, cell, genomics, clinical models), unless the method is atomistic simulation that transfers to materials.
 - Personal milestones: graduations, PhD defenses, new jobs, internships, awards, congratulations. Skip these even inside the field unless the post itself reports a concrete scientific result, paper, dataset, or tool.
 
 ## What counts as worth saving

@@ -109,6 +109,12 @@ radar scan
 Scan the feed, classify new posts and refresh the queue.
 
 ```powershell
+radar reclassify
+```
+
+Re-judge every stored post with the current field profile, for example after editing `config/field_profile.md`. Posts that become relevant get their links resolved.
+
+```powershell
 radar queue
 ```
 
@@ -190,7 +196,9 @@ Download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from the [kokoro-onnx GitHub r
 
 ## Customizing the field
 
-Edit `config/field_profile.md` to define core topics, adjacent topics and material to skip. The classifier and digest curation use this profile.
+Edit `config/field_profile.md` to define core topics, adjacent topics and material to skip. The classifier and digest curation use this profile. Run `radar reclassify` afterward to apply the change to stored posts.
+
+Concrete examples in the profile help the 9B model more than abstract categories. On the first live scan, adding one example line moved an agentic-coding preprint from skip to adjacent, and a biology rule stopped a protein-model press release from being marked core. Classification runs at temperature 0, so the same post gets the same verdict. Setting `think = true` under `[llm]` makes the model reason first; in tests this was about three times slower and not more accurate overall.
 
 ## Tests
 

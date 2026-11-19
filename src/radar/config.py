@@ -36,6 +36,7 @@ class LlmCfg:
     model: str = "mimo-v2.6"
     num_ctx: int = 16384
     timeout_s: float = 120
+    think: bool = False
 
 
 @dataclass

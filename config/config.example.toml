@@ -26,6 +26,7 @@ host = "http://localhost:11434"
 model = "mimo-v2.6"
 num_ctx = 16384
 timeout_s = 120
+think = false             # true: model reasons first; ~3x slower, mixed accuracy in tests
 
 [digest]
 max_items = 8

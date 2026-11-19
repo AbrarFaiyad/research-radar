@@ -187,3 +187,31 @@ async def login_flow(cfg: Config, log: Callable[[str], None] = print, timeout_mi
                 return True
     log("Timed out waiting for login.")
     return False
+
+
+def reclassify_stored(store: Store, classify: Classifier,
+                      resolve: Callable[[list[str], str], list[dict]] = resolve_all,
+                      log: Callable[[str], None] = print) -> tuple[int, int]:
+    """Re-run classification on every stored post, e.g. after editing the field profile.
+    Returns (checked, changed). Newly saved posts get their links resolved."""
+    rows = store.conn.execute(
+        "SELECT p.*, a.kind AS akind, a.headline AS ahead, a.degree AS adeg FROM posts p "
+        "LEFT JOIN authors a ON a.url = p.author_url ORDER BY p.id"
+    ).fetchall()
+    changed = 0
+    for r in rows:
+        if r["kind"] == "ad":
+            continue
+        old_links = json.loads(r["links"] or "[]")
+        post = RawPost(key=r["card_key"] or "", author=r["author_name"], author_url=r["author_url"],
+                       author_kind=r["akind"] or "unknown", degree=r["adeg"], headline=r["ahead"],
+                       text=r["text"], links=[x["url"] for x in old_links])
+        verdict = classify(post)
+        if verdict.tier == r["tier"]:
+            continue
+        changed += 1
+        needs_links = verdict.saved and any(x.get("kind") == "unresolved" for x in old_links)
+        links = resolve(post.links, post.text) if needs_links else None
+        store.update_verdict(r["id"], verdict, links)
+        log(f"  {r['tier']} -> {verdict.tier}: {post.author}: {verdict.summary}")
+    return len(rows), changed
