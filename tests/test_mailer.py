@@ -32,7 +32,7 @@ def test_compose_daily_body_and_attachments(tmp_path):
     assert msg["Subject"] == "Research Radar 2026-11-19"
     assert msg["To"] == msg["From"] == "me@example.org"
     names = [p.get_filename() for p in msg.iter_attachments()]
-    assert names == ["episode.mp3", "podcast_script.md", "summary.md", "connect_queue.csv"]
+    assert names == ["episode.mp3", "summary.md", "connect_queue.csv"]
     html = msg.get_body(("html",)).get_content()
     assert "<table>" in html and "Connection queue" in html
 
@@ -99,3 +99,34 @@ def test_wav_to_mp3_shrinks_audio(tmp_path):
     mp3 = wav_to_mp3(wav)
     assert mp3 is not None and mp3.suffix == ".mp3"
     assert 0 < mp3.stat().st_size < wav.stat().st_size / 4
+
+
+def test_bitrate_choice_fits_budget():
+    from radar.podcast import mp3_bitrate_for
+    assert mp3_bitrate_for(23 * 60) == 80          # 23-minute NotebookLM episode, 16 MiB budget
+    assert mp3_bitrate_for(60 * 60) == 32          # an hour still fits
+    assert mp3_bitrate_for(23 * 60, budget_bytes=8 * 1024 * 1024) == 40
+
+
+def test_oversize_m4a_is_reencoded_to_fit(tmp_path):
+    import av
+    import numpy as np
+
+    from radar.podcast import duration_seconds, email_ready
+    src = tmp_path / "episode.m4a"
+    with av.open(str(src), "w") as out:
+        st = out.add_stream("aac", rate=24000, layout="mono")
+        t = np.arange(24000 * 20) / 24000
+        samples = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        for i in range(0, len(samples), 1024):
+            frame = av.AudioFrame.from_ndarray(samples[None, i:i + 1024], format="fltp", layout="mono")
+            frame.rate = 24000
+            for pkt in st.encode(frame):
+                out.mux(pkt)
+        for pkt in st.encode(None):
+            out.mux(pkt)
+    small_budget = src.stat().st_size // 2
+    mp3 = email_ready(src, budget_bytes=small_budget)
+    assert mp3.suffix == ".mp3" and mp3.stat().st_size <= small_budget
+    assert abs(duration_seconds(mp3) - 20) < 1.5
+    assert email_ready(src, budget_bytes=10**9) == src   # fits: attached unchanged

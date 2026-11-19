@@ -29,20 +29,22 @@ timeout_s = 120
 think = false             # true: model reasons first; ~3x slower, mixed accuracy in tests
 
 [digest]
-max_items = 8
-backlog_days = 3          # saved posts not picked stay eligible this many days
+# The local model pre-screens; Codex reviews every candidate and keeps min..max items.
+min_items = 5
+max_items = 15
+max_candidates = 80       # cap on candidates sent to Codex per run
+backlog_days = 3          # undigested saved posts older than this are dropped
 codex_command = "codex"
 codex_model = ""          # empty = Codex default
 web_search = true
 
-[podcast]
-backend = "sapi"          # "sapi" (Windows built-in voices) or "kokoro" (needs model download)
-host_a_voice = ""         # empty = first available voice
-host_b_voice = ""         # empty = second available voice
-kokoro_model = "data/models/kokoro-v1.0.onnx"
-kokoro_voices = "data/models/voices-v1.0.bin"
-kokoro_voice_a = "af_heart"
-kokoro_voice_b = "am_michael"
+[notebooklm]
+# Podcast = NotebookLM Audio Overview, generated in the agent's own browser profile.
+# Sign in once with `radar notebooklm-login`.
+enabled = true
+length = "default"        # shorter | default | longer
+timeout_min = 30
+add_web_sources = true
 
 [email]
 # Daily email with the digest, queue, script, and podcast MP3. Put your real address only in

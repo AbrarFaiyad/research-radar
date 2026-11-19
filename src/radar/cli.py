@@ -73,33 +73,45 @@ def cmd_queue(cfg, args) -> int:
     return 0
 
 
+def _audio_maker(cfg):
+    if not cfg.notebooklm.enabled:
+        return None
+    from .notebooklm import make_audio
+    return lambda folder, result: make_audio(cfg, folder, result)
+
+
 def cmd_digest(cfg, args) -> int:
     from .digest import run_digest
-    from .podcast import make_synthesizer, wav_seconds
     store = Store(cfg.db_path)
-    model = None if args.no_llm else _model(cfg)
-    synth = None if args.no_audio else make_synthesizer(cfg.podcast, cfg.root)
-    res = run_digest(cfg, store, model, synthesize=synth)
+    res = run_digest(cfg, store, make_audio=None if args.no_audio else _audio_maker(cfg))
     if res:
-        print(f"digest: {len(res.items)} items -> {res.summary_md}")
+        print(f"digest: kept {res.kept} of {res.reviewed} -> {res.summary_md}")
         if res.audio:
-            print(f"audio: {res.audio} ({wav_seconds(res.audio) / 60:.1f} min)")
+            print(f"audio: {res.audio}")
     return 0
 
 
 def cmd_podcast(cfg, args) -> int:
-    """Re-run text-to-speech for a finished digest (for example after a TTS failure)."""
-    from .digest import resynthesize
-    from .podcast import make_synthesizer, wav_seconds
+    """Generate the NotebookLM Audio Overview for a finished digest (or retry after a failure)."""
+    import json
+
+    from .notebooklm import make_audio
     folders = sorted((p for p in cfg.digests_dir.glob("*") if (p / "codex_result.json").exists()),
                      key=lambda p: p.stat().st_mtime)
     if args.folder:
         folders = [cfg.digests_dir / args.folder]
     if not folders or not (folders[-1] / "codex_result.json").exists():
         sys.exit("No finished digest found.")
-    out = resynthesize(folders[-1], make_synthesizer(cfg.podcast, cfg.root))
-    print(f"audio: {out} ({wav_seconds(out) / 60:.1f} min)")
+    folder = folders[-1]
+    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
+    out = make_audio(cfg, folder, result)
+    print(f"audio: {out}")
     return 0
+
+
+def cmd_notebooklm_login(cfg, args) -> int:
+    from .notebooklm import login_flow
+    return 0 if asyncio.run(login_flow(cfg)) else 1
 
 
 def cmd_email_setup(cfg, args) -> int:
@@ -142,7 +154,7 @@ def cmd_daily(cfg, args) -> int:
     rc = cmd_scan(cfg, argparse.Namespace(from_file=None, max_posts=None))
     if rc:
         return rc
-    rc = cmd_digest(cfg, argparse.Namespace(no_llm=False, no_audio=False))
+    rc = cmd_digest(cfg, argparse.Namespace(no_audio=False))
     if rc == 0 and cfg.email.enabled:
         rc = cmd_email(cfg, argparse.Namespace(folder=None, today_only=True))
     return rc
@@ -197,13 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("status", nargs="?")
     q.add_argument("--all", action="store_true", help="include sent/skipped people")
 
-    d = sub.add_parser("digest", help="curate saved posts, research with Codex, render podcast")
-    d.add_argument("--no-llm", action="store_true", help="skip local curation, rank by rules")
-    d.add_argument("--no-audio", action="store_true")
+    d = sub.add_parser("digest", help="Codex selects, sources, and summarizes; NotebookLM podcast")
+    d.add_argument("--no-audio", action="store_true", help="skip the NotebookLM Audio Overview")
 
-    pc = sub.add_parser("podcast", help="rebuild episode.wav for a finished digest")
+    pc = sub.add_parser("podcast", help="(re)generate the NotebookLM podcast for a digest")
     pc.add_argument("folder", nargs="?", help="digest folder name, e.g. 2026-11-19 (default: latest)")
 
+    sub.add_parser("notebooklm-login", help="sign in to Google once in the agent's NotebookLM browser")
     sub.add_parser("email-setup", help="store the Gmail App Password in the OS credential store")
     em = sub.add_parser("email", help="email the latest digest, queue, and podcast to yourself")
     em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
@@ -218,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         cfg.data_dir = args.data_dir.resolve()
     handlers = {"login": cmd_login, "scan": cmd_scan, "reclassify": cmd_reclassify, "queue": cmd_queue, "digest": cmd_digest,
-                "podcast": cmd_podcast, "email-setup": cmd_email_setup, "email": cmd_email,
+                "podcast": cmd_podcast, "notebooklm-login": cmd_notebooklm_login,
+                "email-setup": cmd_email_setup, "email": cmd_email,
                 "daily": cmd_daily, "demo": cmd_demo,
                 "status": cmd_status}
     return handlers[args.cmd](cfg, args)

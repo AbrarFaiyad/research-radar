@@ -11,11 +11,11 @@ dependencies = [
     "keyring>=25",
     "lameenc>=1.7",
     "markdown>=3.5",
+    "av>=14",
 ]
 
 [project.optional-dependencies]
-kokoro = ["kokoro-onnx>=0.4", "soundfile>=0.12"]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "numpy>=1.26"]
 
 [project.scripts]
 radar = "radar.cli:main"

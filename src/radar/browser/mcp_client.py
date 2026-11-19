@@ -1,8 +1,12 @@
-"""Playwright MCP client with a hard tool allowlist.
+"""Playwright MCP client with a hard tool allowlist and an optional host guard.
 
-The scanner only reads. It can navigate, run read-only JavaScript, wait, and close the browser.
-No click, type, or form tool is reachable from this client, so the agent cannot send a
+The LinkedIn scanner uses the default read-only allowlist: navigate, run fixed JavaScript,
+wait, and close. No click, type, or form tool is reachable from it, so the agent cannot send a
 connection request, like, comment, or message even if a prompt or page told it to.
+
+The NotebookLM client gets interaction tools, but only behind a host guard: every interactive
+call first checks that the page is on an allowed host (notebook.google.com) and refuses
+otherwise.
 """
 
 from __future__ import annotations
@@ -20,6 +24,14 @@ ALLOWED_TOOLS = frozenset(
 )
 
 
+INTERACTIVE_TOOLS = frozenset(
+    {"browser_click", "browser_type", "browser_press_key", "browser_file_upload",
+     "browser_fill_form", "browser_select_option", "browser_hover"}
+)
+NOTEBOOKLM_TOOLS = ALLOWED_TOOLS | {"browser_click", "browser_type", "browser_press_key",
+                                    "browser_file_upload", "browser_hover", "browser_tabs"}
+
+
 class ToolNotAllowed(RuntimeError):
     pass
 
@@ -34,7 +46,13 @@ class BrowserMCP:
         profile_dir: Path,
         output_dir: Path,
         headless: bool = False,
+        allowed_tools: frozenset[str] = ALLOWED_TOOLS,
+        allowed_hosts: frozenset[str] | None = None,
     ):
+        self.allowed_tools = allowed_tools
+        self.allowed_hosts = allowed_hosts
+        if allowed_tools & INTERACTIVE_TOOLS and not allowed_hosts:
+            raise ValueError("interactive browser tools require an allowed_hosts guard")
         self.command = command
         self.args = list(args) + [
             "--user-data-dir", str(profile_dir),
@@ -43,6 +61,7 @@ class BrowserMCP:
         if headless:
             self.args.append("--headless")
         self._stack: AsyncExitStack | None = None
+        self._last_call: str | None = None
         self.session: ClientSession | None = None
 
     async def __aenter__(self) -> BrowserMCP:  # noqa: PYI034
@@ -67,14 +86,33 @@ class BrowserMCP:
             await self._stack.aclose()
 
     async def call(self, name: str, arguments: dict[str, Any]) -> str:
-        if name not in ALLOWED_TOOLS:
-            raise ToolNotAllowed(f"tool {name!r} is not on the read-only allowlist")
+        if name not in self.allowed_tools:
+            raise ToolNotAllowed(f"tool {name!r} is not on this client's allowlist")
         assert self.session is not None, "BrowserMCP used outside its context"
+        if name == "browser_file_upload":
+            # A file chooser blocks page scripts, so the host cannot be read now. Uploads are
+            # allowed only straight after a host-checked click, the click that opened it.
+            if self._last_call != "browser_click":
+                raise ToolNotAllowed("file upload refused: no host-checked click opened a chooser")
+        elif name in INTERACTIVE_TOOLS:
+            await self._check_host(name)
         result = await self.session.call_tool(name, arguments)
+        self._last_call = name
         text = "\n".join(getattr(c, "text", "") for c in result.content)
         if getattr(result, "is_error", None) or getattr(result, "isError", None):
             raise RuntimeError(f"{name} failed: {text[:500]}")
         return text
+
+    async def _check_host(self, tool: str) -> None:
+        from urllib.parse import urlparse
+        result = await self.session.call_tool("browser_evaluate", {"function": "() => location.href"})
+        try:
+            href = parse_evaluate_result("\n".join(getattr(c, "text", "") for c in result.content))
+        except ValueError as e:
+            raise ToolNotAllowed(f"{tool} refused: could not read the page host") from e
+        host = urlparse(str(href)).hostname or ""
+        if host not in (self.allowed_hosts or frozenset()):
+            raise ToolNotAllowed(f"{tool} refused: page host {host!r} is not allowed")
 
     async def navigate(self, url: str) -> str:
         return await self.call("browser_navigate", {"url": url})

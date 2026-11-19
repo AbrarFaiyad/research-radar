@@ -79,3 +79,11 @@ LinkedIn feed → Playwright MCP → extractor JSON → prefilter → local LLM 
 ## Left to the builder
 
 Exact prompt wording, schema field names, CLI flag names, file layout inside `src/radar/`, test granularity.
+
+## Revision, 2026-11-19 (after the first live run)
+
+The owner reviewed the first output and set two requirements.
+
+- **Codex selects.** The local model is only a permissive first-pass screen. Every saved post goes to Codex, which keeps 5 to 15 items with real impact, rejects the rest with a reason, finds each item's primary source plus related coverage, and summarizes. The local 8-item curation step was removed.
+- **NotebookLM-quality podcast.** Windows SAPI voices reading a Codex script were rejected. The owner chose to drive NotebookLM (rebranded "Gemini Notebook" at notebook.google.com, Nov 2026) in a second agent browser profile: create a notebook, upload `summary.md`, add source URLs, customise a Deep dive Audio Overview, download the `.m4a`. Interactive browser tools are allowed only behind a host guard for NotebookLM's hosts. The LinkedIn client stays read-only.
+- **Daily email** to the owner with the digest, queue, podcast, and notebook link (Gmail SMTP, App Password in Windows Credential Manager).

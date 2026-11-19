@@ -41,7 +41,9 @@ class LlmCfg:
 
 @dataclass
 class DigestCfg:
-    max_items: int = 8
+    min_items: int = 5
+    max_items: int = 15
+    max_candidates: int = 80
     backlog_days: float = 3
     codex_command: str = "codex"
     codex_model: str = ""
@@ -49,14 +51,11 @@ class DigestCfg:
 
 
 @dataclass
-class PodcastCfg:
-    backend: str = "sapi"
-    host_a_voice: str = ""
-    host_b_voice: str = ""
-    kokoro_model: str = "data/models/kokoro-v1.0.onnx"
-    kokoro_voices: str = "data/models/voices-v1.0.bin"
-    kokoro_voice_a: str = "af_heart"
-    kokoro_voice_b: str = "am_michael"
+class NotebookLMCfg:
+    enabled: bool = True
+    length: str = "default"      # NotebookLM Audio Overview length: shorter | default | longer
+    timeout_min: float = 30      # generation usually takes 5 to 15 minutes
+    add_web_sources: bool = True # add Codex's source URLs as website sources
 
 
 @dataclass
@@ -78,7 +77,7 @@ class Config:
     scan: ScanCfg
     llm: LlmCfg
     digest: DigestCfg
-    podcast: PodcastCfg
+    notebooklm: NotebookLMCfg
     email: EmailCfg = field(default_factory=EmailCfg)
 
     @property
@@ -124,6 +123,6 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         scan=_section(raw, "scan", ScanCfg),
         llm=_section(raw, "llm", LlmCfg),
         digest=_section(raw, "digest", DigestCfg),
-        podcast=_section(raw, "podcast", PodcastCfg),
+        notebooklm=_section(raw, "notebooklm", NotebookLMCfg),
         email=_section(raw, "email", EmailCfg),
     )

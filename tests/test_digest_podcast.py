@@ -2,8 +2,14 @@ import datetime as dt
 import json
 
 from radar.classify import Classifier
-from radar.digest import CODEX_SCHEMA, codex_command, curate, render_markdown, run_digest
-from radar.podcast import clean_lines
+from radar.digest import (
+    CODEX_SCHEMA,
+    build_codex_task,
+    codex_command,
+    render_markdown,
+    run_digest,
+    source_urls,
+)
 from radar.scanner import scan_file
 from tests.conftest import FIXTURES, FakeModel
 
@@ -39,98 +45,103 @@ def test_codex_command_puts_search_before_exec(cfg, tmp_path):
     assert "--search" not in codex_command(cfg, tmp_path, tmp_path / "s.json", tmp_path / "o.json")
 
 
-def test_curate_ignores_unknown_ids_and_duplicates(store):
+def test_task_sends_every_candidate_with_limits(store, cfg):
     _seed(store)
     rows = store.saved_posts(undigested_only=True)
-    first = rows[0]["id"]
-    model = FakeModel(curate_items=[
-        {"post_id": first, "title": "A", "why": "w"},
-        {"post_id": first, "title": "A again", "why": "dup"},
-        {"post_id": 99999, "title": "ghost", "why": "made up"},
-    ])
-    items = curate(rows, model, "p", k=8, today=TODAY)
-    assert [i.post_id for i in items] == [first]
+    template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
+    task = build_codex_task(rows, "PROFILE", template, 5, 15, today=TODAY)
+    assert all(f"### Candidate {r['id']}" in task for r in rows)
+    assert "between 5 and 15" in task and "2026-11-19" in task and "PROFILE" in task
 
 
-def test_curate_falls_back_without_model(store):
-    _seed(store)
-    rows = store.saved_posts(undigested_only=True)
-    items = curate(rows, None, "p", k=2)
-    assert len(items) == 2
-    tiers = {r["id"]: r["tier"] for r in rows}
-    assert all(tiers[i.post_id] == "core" for i in items)
+def test_braces_in_post_text_do_not_break_formatting(store, cfg):
+    from radar.models import RawPost, Verdict
+    post = RawPost.from_dict({"key": "b", "author": "A", "text": "Energy E = {x | x > 0} " * 3})
+    store.add_post(post, Verdict("core", "paper", [], "s", "r"), [])
+    template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
+    task = build_codex_task(store.saved_posts(), "p", template, 5, 15)
+    assert "{x | x > 0}" in task
 
 
 FAKE_RESULT = {
     "headline": "LoRA makes foundation potentials cheap to specialize",
-    "overview": "Two items.",
-    "papers": [{
-        "title": "Low-rank adaptation of MACE for molten salts", "authors": "D. Example et al.",
-        "venue": "preprint", "url": "https://example.org/preprint/molten-salt-lora",
+    "overview": "Reviewed 4, kept 1.",
+    "items": [{
+        "post_ids": [1], "title": "Low-rank adaptation of MACE for molten salts",
+        "kind": "preprint", "authors": "D. Example et al.", "venue": "arXiv",
+        "primary_url": "https://example.org/preprint/molten-salt-lora",
+        "sources": [{"title": "Code", "url": "https://github.com/example/lora"},
+                    {"title": "Dup", "url": "https://example.org/preprint/molten-salt-lora"}],
         "what": "w", "how": "h", "why_it_matters": "y", "relevance": "r", "limitations": "l",
-        "confidence": "high",
+        "impact": "high", "confidence": "high",
     }],
-    "podcast": [{"speaker": "A", "text": "Welcome."}, {"speaker": "B", "text": "Why LoRA?"}],
+    "rejected": [{"post_id": 2, "reason": "HPC, low signal"}],
+    "podcast_focus": "Lead with LoRA.",
 }
 
 
-def test_run_digest_end_to_end_with_fakes(cfg, store):
+def test_run_digest_sends_all_candidates_and_marks_them(cfg, store):
     _seed(store)
+    n_saved = len(store.saved_posts(undigested_only=True))
     seen = {}
 
     def runner(cmd, task):
-        seen["cmd"], seen["task"] = cmd, task
-        out = cmd[cmd.index("-o") + 1]
-        with open(out, "w", encoding="utf-8") as f:
+        seen["task"] = task
+        with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as f:
             json.dump(FAKE_RESULT, f)
 
-    def synth(lines, out_wav):
-        seen["lines"] = lines
-        out_wav.write_bytes(b"RIFF")
-        return out_wav
+    def make_audio(folder, result):
+        seen["audio_called_with"] = result["podcast_focus"]
+        out = folder / "episode.m4a"
+        out.write_bytes(b"x")
+        return out
 
-    res = run_digest(cfg, store, FakeModel(), runner=runner, synthesize=synth,
-                     log=lambda s: None, today=TODAY)
-    assert res is not None and len(res.items) == 4
-    assert "molten LiCl-KCl" in seen["task"] and "2026-11-19" in seen["task"]
+    res = run_digest(cfg, store, runner=runner, make_audio=make_audio, log=lambda s: None,
+                     today=TODAY)
+    assert res is not None and res.reviewed == n_saved == 4 and res.kept == 1
+    assert seen["task"].count("### Candidate ") == 4
     md = res.summary_md.read_text(encoding="utf-8")
-    assert "LoRA makes foundation potentials" in md and "**How.** h" in md
-    assert res.audio and res.audio.exists()
-    assert seen["lines"][1]["text"] == "Why LoRA?"
-    # Everything saved is now marked as digested; a second run has nothing to do.
+    assert "1 kept of 4 candidate posts" in md and "[Code](https://github.com/example/lora)" in md
+    assert (res.folder / "sources.txt").read_text(encoding="utf-8").split() == [
+        "https://example.org/preprint/molten-salt-lora", "https://github.com/example/lora"]
+    assert seen["audio_called_with"] == "Lead with LoRA." and res.audio.exists()
+    # Codex judged all four, so none come back tomorrow.
     assert store.saved_posts(undigested_only=True) == []
-    assert run_digest(cfg, store, FakeModel(), runner=runner, log=lambda s: None) is None
 
 
-def test_unpicked_posts_carry_over_and_folders_never_collide(cfg, store):
+def test_audio_failure_keeps_digest(cfg, store):
     _seed(store)
-    rows = store.saved_posts(undigested_only=True)
 
     def runner(cmd, task):
         with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as f:
             json.dump(FAKE_RESULT, f)
 
-    one = FakeModel(curate_items=[{"post_id": rows[0]["id"], "title": "t", "why": "w"}])
-    first = run_digest(cfg, store, one, runner=runner, log=lambda s: None, today=TODAY)
-    left = store.saved_posts(undigested_only=True)
-    assert len(left) == len(rows) - 1                      # unpicked posts stay eligible
-    second = run_digest(cfg, store, FakeModel(), runner=runner, log=lambda s: None, today=TODAY)
-    assert first.folder.name == "2026-11-19"
-    assert second.folder.name == "2026-11-19-2"             # same day, new folder
-    assert (first.folder / "summary.md").exists()
+    def broken(folder, result):
+        raise RuntimeError("NotebookLM UI changed")
+
+    logs = []
+    res = run_digest(cfg, store, runner=runner, make_audio=broken, log=logs.append, today=TODAY)
+    assert res.summary_md.exists() and res.audio is None
+    assert any("radar podcast" in line for line in logs)
 
 
-def test_render_markdown_lists_selection():
-    from radar.models import DigestItem
-    md = render_markdown(FAKE_RESULT, "2026-11-19", [DigestItem(1, "T", [], "why")])
-    assert md.startswith("# Research digest, 2026-11-19")
-    assert "- T (why)" in md
-    missing = dict(FAKE_RESULT, papers=[dict(FAKE_RESULT["papers"][0], url="")])
-    assert "Primary source not found." in render_markdown(missing, "d", [])
-    assert "<>" not in render_markdown(missing, "d", [])
+def test_same_day_reruns_get_new_folders(cfg, store):
+    _seed(store)
+
+    def runner(cmd, task):
+        with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as f:
+            json.dump(FAKE_RESULT, f)
+
+    first = run_digest(cfg, store, runner=runner, log=lambda s: None, today=TODAY)
+    from radar.models import RawPost, Verdict
+    store.add_post(RawPost.from_dict({"key": "n", "author": "B", "text": "new post " * 10}),
+                   Verdict("core", "paper", [], "s", "r"), [])
+    second = run_digest(cfg, store, runner=runner, log=lambda s: None, today=TODAY)
+    assert (first.folder.name, second.folder.name) == ("2026-11-19", "2026-11-19-2")
 
 
-def test_clean_lines_normalizes_speakers_and_markup():
-    out = clean_lines([{"speaker": "A", "text": "**Hi**  there"}, {"speaker": "x", "text": "ok"},
-                       {"speaker": "A", "text": "   "}])
-    assert out == [{"speaker": "A", "text": "Hi there"}, {"speaker": "B", "text": "ok"}]
+def test_render_and_sources_handle_missing_urls():
+    missing = dict(FAKE_RESULT, items=[dict(FAKE_RESULT["items"][0], primary_url="", sources=[])])
+    md = render_markdown(missing, "d", 3)
+    assert "Primary source not found." in md and "<>" not in md
+    assert source_urls(missing) == []

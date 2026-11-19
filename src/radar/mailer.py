@@ -81,11 +81,15 @@ def compose_daily(cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path,
     parts: list[str] = []
     candidates: list[Path] = []
     if digest_folder is not None and (digest_folder / "summary.md").exists():
+        link_file = digest_folder / "notebook_url.txt"
+        if link_file.exists():
+            parts.append(f"**Podcast:** attached, and playable in NotebookLM: "
+                         f"<{link_file.read_text(encoding='utf-8').strip()}>")
         parts.append((digest_folder / "summary.md").read_text(encoding="utf-8"))
-        candidates += [digest_folder / "episode.mp3", digest_folder / "podcast_script.md",
-                       digest_folder / "summary.md"]
-        if not (digest_folder / "episode.mp3").exists():
-            candidates.insert(1, digest_folder / "episode.wav")
+        audio = sorted(digest_folder.glob("episode.*"),
+                       key=lambda p: [".mp3", ".m4a", ".wav"].index(p.suffix.lower())
+                       if p.suffix.lower() in (".mp3", ".m4a", ".wav") else 9)
+        candidates += audio[:1] + [digest_folder / "summary.md"]
     else:
         parts.append(f"# Research Radar, {today.isoformat()}\n\nNo new saved posts for a digest today.")
     if queue_md.exists():

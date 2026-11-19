@@ -1,122 +1,84 @@
-"""Text-to-speech for the two-host podcast script.
-
-Backends:
-- sapi: Windows built-in voices through System.Speech. No download, works out of the box.
-- kokoro: kokoro-onnx (Apache-2.0, 82M params). Better voices; needs the model files once.
-"""
+"""Audio file helpers for the podcast that NotebookLM generates."""
 
 from __future__ import annotations
 
-import json
-import subprocess
-import tempfile
 import wave
 from pathlib import Path
-
-from .config import PodcastCfg
-
-SAPI_PS = r"""
-param([string]$LinesPath, [string]$OutPath, [string]$VoiceA, [string]$VoiceB)
-Add-Type -AssemblyName System.Speech
-$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$voices = @($s.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo.Name })
-if (-not $VoiceA) { $VoiceA = $voices[0] }
-if (-not $VoiceB) { $VoiceB = if ($voices.Count -gt 1) { $voices[1] } else { $voices[0] } }
-$lines = Get-Content -Raw -Encoding UTF8 $LinesPath | ConvertFrom-Json
-$s.SetOutputToWaveFile($OutPath)
-$s.Rate = 1
-foreach ($ln in $lines) {
-  if ($ln.speaker -eq 'A') { $s.SelectVoice($VoiceA) } else { $s.SelectVoice($VoiceB) }
-  $s.Speak($ln.text)
-}
-$s.SetOutputToNull()
-$s.Dispose()
-Write-Output "voices: A=$VoiceA B=$VoiceB"
-"""
-
-
-def clean_lines(lines: list[dict]) -> list[dict]:
-    out = []
-    for ln in lines:
-        text = " ".join(str(ln.get("text", "")).replace("*", "").split())
-        if text:
-            out.append({"speaker": "A" if ln.get("speaker") == "A" else "B", "text": text})
-    return out
-
-
-def synthesize_sapi(lines: list[dict], out_wav: Path, cfg: PodcastCfg) -> Path:
-    out_wav.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        lines_path = Path(tmp) / "lines.json"
-        lines_path.write_text(json.dumps(clean_lines(lines)), encoding="utf-8")
-        ps_path = Path(tmp) / "speak.ps1"
-        ps_path.write_text(SAPI_PS, encoding="utf-8-sig")
-        args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_path),
-                "-LinesPath", str(lines_path), "-OutPath", str(out_wav.resolve())]
-        # Empty strings do not bind reliably under Windows PowerShell 5.1; omit them.
-        if cfg.host_a_voice:
-            args += ["-VoiceA", cfg.host_a_voice]
-        if cfg.host_b_voice:
-            args += ["-VoiceB", cfg.host_b_voice]
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=1800, check=False)
-    if proc.returncode != 0 or not out_wav.exists():
-        raise RuntimeError(f"SAPI synthesis failed: {proc.stderr[-1000:]}")
-    return out_wav
-
-
-def synthesize_kokoro(lines: list[dict], out_wav: Path, cfg: PodcastCfg, root: Path) -> Path:
-    try:
-        import numpy as np
-        import soundfile as sf
-        from kokoro_onnx import Kokoro
-    except ImportError as e:
-        raise RuntimeError("kokoro backend needs `pip install -e .[kokoro]`") from e
-    model, voices = root / cfg.kokoro_model, root / cfg.kokoro_voices
-    if not (model.exists() and voices.exists()):
-        raise RuntimeError(f"Kokoro model files missing: {model} / {voices}. See README, Podcast audio.")
-    tts = Kokoro(str(model), str(voices))
-    chunks, sr = [], 24000
-    for ln in clean_lines(lines):
-        voice = cfg.kokoro_voice_a if ln["speaker"] == "A" else cfg.kokoro_voice_b
-        samples, sr = tts.create(ln["text"], voice=voice, speed=1.0, lang="en-us")
-        chunks += [samples, np.zeros(int(sr * 0.35), dtype=samples.dtype)]
-    out_wav.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(out_wav), np.concatenate(chunks), sr)
-    return out_wav
 
 
 def wav_to_mp3(wav_path: Path, kbps: int = 64) -> Path | None:
     """Encode a 16-bit PCM WAV to MP3 (about 0.5 MB per minute at 64 kbps) for email.
-    Returns None if lameenc is not installed."""
+    Returns None if lameenc is missing or the WAV is not 16-bit PCM."""
     try:
         import lameenc
     except ImportError:
         return None
-    with wave.open(str(wav_path), "rb") as w:
-        if w.getsampwidth() != 2:
-            return None
-        enc = lameenc.Encoder()
-        enc.set_bit_rate(kbps)
-        enc.set_in_sample_rate(w.getframerate())
-        enc.set_channels(w.getnchannels())
-        enc.set_quality(5)
-        data = enc.encode(w.readframes(w.getnframes())) + enc.flush()
+    try:
+        with wave.open(str(wav_path), "rb") as w:
+            if w.getsampwidth() != 2:
+                return None
+            enc = lameenc.Encoder()
+            enc.set_bit_rate(kbps)
+            enc.set_in_sample_rate(w.getframerate())
+            enc.set_channels(w.getnchannels())
+            enc.set_quality(5)
+            data = enc.encode(w.readframes(w.getnframes())) + enc.flush()
+    except wave.Error:
+        return None
     mp3 = wav_path.with_suffix(".mp3")
     mp3.write_bytes(data)
     return mp3
 
 
-def wav_seconds(path: Path) -> float:
-    with wave.open(str(path), "rb") as w:
-        return w.getnframes() / float(w.getframerate())
+EMAIL_AUDIO_BUDGET = 16 * 1024 * 1024  # leaves room for the digest under Gmail's 25 MB cap
 
 
-def make_synthesizer(cfg: PodcastCfg, root: Path):
-    def _synth(lines: list[dict], out_wav: Path) -> Path:
-        if cfg.backend == "kokoro":
-            wav = synthesize_kokoro(lines, out_wav, cfg, root)
-        else:
-            wav = synthesize_sapi(lines, out_wav, cfg)
-        wav_to_mp3(wav)
-        return wav
-    return _synth
+def mp3_bitrate_for(seconds: float, budget_bytes: int = EMAIL_AUDIO_BUDGET) -> int:
+    """Highest standard MP3 bitrate (kbps) whose file fits the budget; floor 24 kbps."""
+    for kbps in (96, 80, 64, 56, 48, 40, 32, 24):
+        if seconds * kbps * 1000 / 8 <= budget_bytes * 0.97:
+            return kbps
+    return 24
+
+
+def transcode_to_mp3(src: Path, kbps: int, sample_rate: int = 24000) -> Path:
+    """Decode any audio PyAV reads (NotebookLM's AAC .m4a) and re-encode as mono MP3."""
+    import av
+    import lameenc
+
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(kbps)
+    enc.set_in_sample_rate(sample_rate)
+    enc.set_channels(1)
+    enc.set_quality(5)
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=sample_rate)
+    chunks = []
+    with av.open(str(src)) as container:
+        for frame in container.decode(audio=0):
+            for out in resampler.resample(frame):
+                chunks.append(enc.encode(bytes(out.planes[0])[: out.samples * 2]))
+        for out in resampler.resample(None):
+            chunks.append(enc.encode(bytes(out.planes[0])[: out.samples * 2]))
+    chunks.append(enc.flush())
+    dst = src.with_suffix(".mp3")
+    dst.write_bytes(b"".join(chunks))
+    return dst
+
+
+def duration_seconds(path: Path) -> float:
+    import av
+    with av.open(str(path)) as c:
+        return float(c.duration / 1e6) if c.duration else 0.0
+
+
+def email_ready(audio: Path, budget_bytes: int = EMAIL_AUDIO_BUDGET) -> Path:
+    """The episode as it will be attached. Kept as-is when it fits the email budget;
+    otherwise re-encoded to an MP3 bitrate chosen to fit."""
+    if audio.stat().st_size <= budget_bytes:
+        return audio
+    if audio.suffix.lower() == ".wav":
+        mp3 = wav_to_mp3(audio, kbps=48)
+        if mp3 and mp3.stat().st_size <= budget_bytes:
+            return mp3
+    kbps = mp3_bitrate_for(duration_seconds(audio), budget_bytes)
+    return transcode_to_mp3(audio, kbps)

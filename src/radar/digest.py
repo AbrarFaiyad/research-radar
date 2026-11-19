@@ -1,4 +1,9 @@
-"""Daily digest: local LLM curates saved posts, Codex researches them, output is rendered."""
+"""Daily digest: Codex selects, sources, and summarizes the day's candidate posts.
+
+The local model only pre-screens the feed. Every candidate it saved goes to Codex, which keeps
+the 5 to 15 items with real impact, finds their primary sources and related coverage, and
+writes the summary. Audio comes afterward from NotebookLM (see notebooklm.py).
+"""
 
 from __future__ import annotations
 
@@ -12,70 +17,60 @@ from pathlib import Path
 
 from .config import Config
 from .db import Store
-from .llm import ChatModel
-from .models import DigestItem
-
-CURATE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "post_id": {"type": "integer"},
-                    "title": {"type": "string"},
-                    "why": {"type": "string"},
-                },
-                "required": ["post_id", "title", "why"],
-            },
-        }
-    },
-    "required": ["items"],
-}
-
-CURATE_SYSTEM = """You pick today's research briefing items for one reader. Today is {today}.
-
-{profile}
-
-You get saved LinkedIn posts. Choose at most {k} that point to a specific paper, preprint,
-dataset, model, or tool worth a deep read. Merge duplicates (two posts about the same paper:
-keep the one with the better link). Order by importance to the reader, core topics first.
-title: your best guess at the work's title or a short descriptive name.
-why: one short clause on why it made the cut.
-Return only JSON."""
 
 _S = {"type": "string"}
 CODEX_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["headline", "overview", "papers", "podcast"],
+    "required": ["headline", "overview", "items", "rejected", "podcast_focus"],
     "properties": {
         "headline": _S,
         "overview": _S,
-        "papers": {
+        "items": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["title", "authors", "venue", "url", "what", "how",
-                             "why_it_matters", "relevance", "limitations", "confidence"],
+                "required": ["post_ids", "title", "kind", "authors", "venue", "primary_url",
+                             "sources", "what", "how", "why_it_matters", "relevance",
+                             "limitations", "impact", "confidence"],
                 "properties": {
-                    "title": _S, "authors": _S, "venue": _S, "url": _S, "what": _S, "how": _S,
-                    "why_it_matters": _S, "relevance": _S, "limitations": _S,
+                    "post_ids": {"type": "array", "items": {"type": "integer"}},
+                    "title": _S,
+                    "kind": {"type": "string", "enum": ["paper", "preprint", "dataset", "model",
+                                                        "software", "news", "article", "other"]},
+                    "authors": _S,
+                    "venue": _S,
+                    "primary_url": _S,
+                    "sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["title", "url"],
+                            "properties": {"title": _S, "url": _S},
+                        },
+                    },
+                    "what": _S,
+                    "how": _S,
+                    "why_it_matters": _S,
+                    "relevance": _S,
+                    "limitations": _S,
+                    "impact": {"type": "string", "enum": ["high", "medium"]},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                 },
             },
         },
-        "podcast": {
+        "rejected": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["speaker", "text"],
-                "properties": {"speaker": {"type": "string", "enum": ["A", "B"]}, "text": _S},
+                "required": ["post_id", "reason"],
+                "properties": {"post_id": {"type": "integer"}, "reason": _S},
             },
         },
+        "podcast_focus": _S,
     },
 }
 
@@ -85,60 +80,37 @@ class DigestResult:
     folder: Path
     summary_md: Path
     audio: Path | None
-    items: list[DigestItem]
+    kept: int
+    reviewed: int
 
 
 def _post_view(row) -> dict:
     links = json.loads(row["links"] or "[]")
     return {
         "post_id": row["id"],
-        "tier": row["tier"],
         "author": row["author_name"],
-        "summary": row["summary"],
-        "topics": json.loads(row["topics"] or "[]"),
+        "screen_summary": row["summary"],
         "links": [link["url"] for link in links],
-        "text": (row["text"] or "")[:1500],
+        "text": (row["text"] or "")[:2500],
     }
 
 
-def curate(rows, model: ChatModel | None, profile: str, k: int,
-           today: dt.date | None = None) -> list[DigestItem]:
-    """Local LLM picks and orders items. Falls back to a rule ranking if no model."""
-    views = [_post_view(r) for r in rows]
-    by_id = {v["post_id"]: v for v in views}
-    if not views:
-        return []
-    picked: list[DigestItem] = []
-    if model is not None:
-        system = CURATE_SYSTEM.format(today=(today or dt.date.today()).isoformat(),
-                                      profile=profile.strip(), k=k)
-        raw = model.json_chat(system, json.dumps(views, ensure_ascii=False, indent=1), CURATE_SCHEMA)
-        for it in raw.get("items", []):
-            v = by_id.get(it.get("post_id"))
-            if v and all(p.post_id != v["post_id"] for p in picked):
-                picked.append(DigestItem(v["post_id"], str(it.get("title") or v["summary"]),
-                                         v["links"], str(it.get("why") or "")))
-    if not picked:  # fallback or model returned nothing usable
-        ranked = sorted(views, key=lambda v: (v["tier"] != "core", not v["links"]))
-        picked = [DigestItem(v["post_id"], v["summary"] or "", v["links"], v["tier"]) for v in ranked]
-    return picked[:k]
-
-
-def build_codex_task(items: list[DigestItem], rows_by_id: dict, profile: str, template: str,
+def build_codex_task(rows, profile: str, template: str, min_items: int, max_items: int,
                      today: dt.date | None = None) -> str:
     blocks = []
-    for i, it in enumerate(items, start=1):
-        v = rows_by_id[it.post_id]
+    for r in rows:
+        v = _post_view(r)
         blocks.append(
-            f"### Item {i}: {it.title}\n"
+            f"### Candidate {v['post_id']}\n"
             f"- Posted by: {v['author']}\n"
-            f"- Poster summary: {v['summary']}\n"
-            f"- Links: {', '.join(it.urls) or 'none'}\n"
-            f"- Why selected: {it.why}\n"
+            f"- Screen summary: {v['screen_summary']}\n"
+            f"- Links: {', '.join(v['links']) or 'none'}\n"
             f"- Post text:\n{v['text']}\n"
         )
-    return template.format(today=(today or dt.date.today()).isoformat(), profile=profile.strip(),
-                           n=len(items), items="\n".join(blocks))
+    return template.format(
+        today=(today or dt.date.today()).isoformat(), profile=profile.strip(), n=len(rows),
+        min_items=min_items, max_items=max_items, items="\n".join(blocks),
+    )
 
 
 def codex_command(cfg: Config, folder: Path, schema_path: Path, out_path: Path) -> list[str]:
@@ -161,14 +133,18 @@ def run_codex(cmd: list[str], task: str, timeout_s: int = 3600) -> None:
         raise RuntimeError(f"codex exited {proc.returncode}: {proc.stderr[-2000:]}")
 
 
-def render_markdown(result: dict, day: str, items: list[DigestItem]) -> str:
+def render_markdown(result: dict, day: str, reviewed: int) -> str:
+    items = result.get("items", [])
     out = [f"# Research digest, {day}", "", f"**{result.get('headline', '').strip()}**", "",
-           result.get("overview", "").strip(), ""]
-    for i, p in enumerate(result.get("papers", []), start=1):
+           result.get("overview", "").strip(), "",
+           f"*{len(items)} kept of {reviewed} candidate posts.*", ""]
+    for i, p in enumerate(items, start=1):
+        src = f"<{p['primary_url']}>" if p["primary_url"].strip() else "Primary source not found."
         out += [
             f"## {i}. {p['title']}",
-            f"*{p['authors']}* · {p['venue']} · confidence: {p['confidence']}  ",
-            f"<{p['url']}>" if p["url"].strip() else "Primary source not found.",
+            (f"*{p['authors']}* · {p['venue']} · {p['kind']} · impact: {p['impact']} · "
+             f"confidence: {p['confidence']}  "),
+            src,
             "",
             f"**What.** {p['what']}",
             "",
@@ -181,58 +157,68 @@ def render_markdown(result: dict, day: str, items: list[DigestItem]) -> str:
             f"**Limitations.** {p['limitations']}",
             "",
         ]
-    out += ["---", "Selected from the feed:", ""]
-    out += [f"- {it.title} ({it.why})" for it in items]
+        extra = [s for s in p.get("sources", []) if s.get("url")]
+        if extra:
+            out += ["**More sources.** " + " · ".join(f"[{s['title']}]({s['url']})" for s in extra), ""]
     return "\n".join(out) + "\n"
 
 
-def run_digest(cfg: Config, store: Store, model: ChatModel | None,
+def source_urls(result: dict, limit: int = 40) -> list[str]:
+    """Primary and supporting URLs, deduped, for NotebookLM website sources."""
+    urls: list[str] = []
+    for p in result.get("items", []):
+        for u in [p.get("primary_url", "")] + [s.get("url", "") for s in p.get("sources", [])]:
+            u = (u or "").strip()
+            if u.startswith("http") and u not in urls:
+                urls.append(u)
+    return urls[:limit]
+
+
+AudioMaker = Callable[[Path, dict], Path | None]
+
+
+def run_digest(cfg: Config, store: Store,
                runner: Callable[[list[str], str], None] = run_codex,
-               synthesize: Callable[[list[dict], Path], Path | None] | None = None,
+               make_audio: AudioMaker | None = None,
                log: Callable[[str], None] = print,
                today: dt.date | None = None) -> DigestResult | None:
     today = today or dt.date.today()
-    # Unpicked posts stay eligible for a few days, then age out instead of piling up.
     rows = store.saved_posts(undigested_only=True, since_days=cfg.digest.backlog_days)
+    rows = rows[: cfg.digest.max_candidates]
     if not rows:
         log("No new saved posts since the last digest.")
         return None
-    profile = cfg.field_profile_text()
-    items = curate(rows, model, profile, cfg.digest.max_items, today=today)
-    if not items:
-        log("Curation picked nothing.")
-        return None
-    log(f"curated {len(items)} of {len(rows)} saved posts")
+    log(f"sending {len(rows)} candidate posts to Codex for selection and research")
 
     folder = unique_folder(cfg.digests_dir, today.isoformat())
-    rows_by_id = {r["id"]: _post_view(r) for r in rows}
     template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
-    task = build_codex_task(items, rows_by_id, profile, template, today=today)
+    task = build_codex_task(rows, cfg.field_profile_text(), template,
+                            cfg.digest.min_items, cfg.digest.max_items, today=today)
     (folder / "codex_task.md").write_text(task, encoding="utf-8")
     schema_path = folder / "codex_schema.json"
     schema_path.write_text(json.dumps(CODEX_SCHEMA, indent=1), encoding="utf-8")
     out_path = folder / "codex_result.json"
 
-    log("running Codex research (web search on); this can take several minutes")
+    log("running Codex (web search on); this can take several minutes")
     runner(codex_command(cfg, folder, schema_path, out_path), task)
     result = json.loads(out_path.read_text(encoding="utf-8"))
 
     summary_md = folder / "summary.md"
-    summary_md.write_text(render_markdown(result, today.isoformat(), items), encoding="utf-8")
-    script_md = folder / "podcast_script.md"
-    script_md.write_text("\n\n".join(f"**{ln['speaker']}:** {ln['text']}" for ln in result["podcast"]),
-                         encoding="utf-8")
+    summary_md.write_text(render_markdown(result, today.isoformat(), len(rows)), encoding="utf-8")
+    (folder / "sources.txt").write_text("\n".join(source_urls(result)) + "\n", encoding="utf-8")
 
-    # Record the digest before audio, so a TTS failure never causes a second Codex run.
-    store.record_digest(today.isoformat(), str(folder), [it.post_id for it in items])
+    # Codex judged every candidate (kept or rejected), so all of them are done. Recorded
+    # before audio, so an audio failure never triggers a second Codex run.
+    store.record_digest(today.isoformat(), str(folder), [r["id"] for r in rows])
+    log(f"Codex kept {len(result.get('items', []))} of {len(rows)}")
 
     audio = None
-    if synthesize is not None and result.get("podcast"):
+    if make_audio is not None and result.get("items"):
         try:
-            audio = synthesize(result["podcast"], folder / "episode.wav")
+            audio = make_audio(folder, result)
         except Exception as e:  # noqa: BLE001 - audio is optional; the written digest stands
-            log(f"audio synthesis failed: {e}. Retry with `radar podcast {folder.name}`.")
-    return DigestResult(folder, summary_md, audio, items)
+            log(f"audio failed: {e}. Retry with `radar podcast {folder.name}`.")
+    return DigestResult(folder, summary_md, audio, len(result.get("items", [])), len(rows))
 
 
 def unique_folder(base: Path, name: str) -> Path:
@@ -242,9 +228,3 @@ def unique_folder(base: Path, name: str) -> Path:
         folder, n = base / f"{name}-{n}", n + 1
     folder.mkdir(parents=True)
     return folder
-
-
-def resynthesize(folder: Path, synthesize: Callable[[list[dict], Path], Path | None]) -> Path | None:
-    """Rebuild episode.wav from a finished digest's codex_result.json."""
-    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
-    return synthesize(result["podcast"], folder / "episode.wav")

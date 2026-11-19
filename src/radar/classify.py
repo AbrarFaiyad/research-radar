@@ -34,6 +34,9 @@ Rules:
   (graduations, defenses, new jobs, awards, congratulations) that do not themselves report a result.
   An award or workshop post that describes the new technical work behind it is not a milestone; judge the work.
 - Event or talk announcements count only if they describe specific new technical work in the field.
+- You are a first-pass screen. A stronger model reviews everything you save, so when a post is
+  borderline between "adjacent" and "skip", choose "adjacent". Still skip ads, milestones, and
+  clearly unrelated posts.
 - Dates up to today are valid; do not reject a post because a paper or arXiv id looks recent.
 - summary: one plain sentence on what was done or found. reason: one short clause on why this tier.
 - topics: up to 5 short lowercase tags, e.g. "mlip", "mace", "mos2", "molten salts", "hpc".
