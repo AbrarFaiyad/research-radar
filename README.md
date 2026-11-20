@@ -15,7 +15,7 @@ Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [In
 ## What it does
 
 - Scans the LinkedIn feed and classifies posts against a field profile.
-- Exports a queue of authors to consider connecting with. The owner sends each request by hand.
+- Lists the authors worth connecting with, leaving out people you are already connected to or have invited. You send each request yourself.
 - Sends every saved post to Codex, which keeps the 5 to 15 items with real impact, finds their primary sources and related coverage, and writes the digest.
 - Turns the digest into a NotebookLM Audio Overview, a two-host podcast.
 - Emails the digest, queue, and podcast to the owner each day.
@@ -44,6 +44,7 @@ flowchart TD
     end
 
     DB --> Q["Connection queue<br/>connect_queue.md and .csv<br/>you send requests by hand"]
+    CX[("Your connections<br/>LinkedIn export, kept current<br/>by your Sends")] -. left out .-> Q
     DB --> C1
 
     subgraph RESEARCH["3. Select and research: Codex with web search"]
@@ -76,6 +77,7 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Scanner | `src/radar/scanner.py` | Scrolls, deduplicates and processes posts |
 | Classification | `src/radar/classify.py` | Filters and classifies posts |
 | Storage and queue | `src/radar/db.py`, `src/radar/queue.py` | Stores records and exports authors |
+| Connections | `src/radar/connections.py` | Reads LinkedIn's data export so connections stay out of the queue |
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
@@ -122,6 +124,8 @@ Open it with the **Research Radar** shortcut on the desktop or in the Start menu
 4. **Approve.** The model rewrites the profile so the filter agrees with your corrections and lists what it changed. Apply it, and optionally re-judge stored posts. The old profile is backed up first.
 
 The wizard's state is saved, so closing the tab loses nothing. The panel opens on the Setup tab the first time it runs.
+
+![Setup tab on a fresh install](docs/images/panel-setup.png)
 
 <p>
 <img src="docs/images/panel-settings.png" alt="Settings tab" width="49%">
@@ -242,7 +246,7 @@ Codex reviews every candidate once, and saved posts older than three days (`back
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
 - **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
-- **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, and the wizard lets you keep it on your computer by drafting with the local model. Health checks mask email addresses and home-folder paths.
+- **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, only the redacted text is kept, and the wizard lets you keep it on your computer by drafting with the local model. The LinkedIn export is read in memory; only names, profile links, and dates are stored. Health checks mask email addresses and home-folder paths.
 - **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
 ## Example output
@@ -256,7 +260,8 @@ The files in `docs/example/` come from an early version that ran on the syntheti
 
 Default paths are relative to the repository root:
 
-- `data/radar.db`: SQLite database of posts, authors and digests.
+- `data/radar.db`: SQLite database of posts, authors, connections, and digests.
+- `data/onboarding/`: setup wizard state, the redacted CV text, and backups of replaced field profiles.
 - `data/queue/connect_queue.md` and `connect_queue.csv`: connection queue.
 - `data/digests/YYYY-MM-DD/summary.md`: researched briefing.
 - `data/digests/YYYY-MM-DD/sources.txt`: primary and supporting URLs given to NotebookLM.
@@ -297,11 +302,17 @@ Concrete examples in the profile help the 9B model more than abstract categories
 
 ## Tests
 
+The installer leaves out the test tools. Add them once, then run the suite:
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe -e ".[dev]"
+```
+
 ```powershell
 .\.venv\Scripts\python -m pytest
 ```
 
-Tests cover classification, scanning, deduplication, link handling, queue exports, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, email composition and audio re-encoding, stage isolation and the run lock, health checks, settings validation, onboarding (CV extraction and redaction, draft, calibration, refinement, apply), and the control panel API and its security checks. They use synthetic data and fakes, so they need no network, accounts, or GPU.
+Tests cover classification, scanning, deduplication, link handling, queue exports, the connections import, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, email composition and audio re-encoding, stage isolation and the run lock, health checks, settings validation, onboarding (CV extraction and redaction, draft, calibration, refinement, apply), and the control panel API and its security checks. They use synthetic data and fakes, so they need no network, accounts, or GPU.
 
 ## Limitations
 
