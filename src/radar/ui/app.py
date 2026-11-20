@@ -462,7 +462,8 @@ def create_app(
         key = "".join(str(payload.get("key", "")).split())
         if len(key) < _KEY_MIN:
             raise HTTPException(
-                400, f"that does not look like an API key (under {_KEY_MIN} characters)"
+                400,
+                f"that does not look like a Claude subscription token (under {_KEY_MIN} characters)",
             )
         try:
             set_secret(fresh(), key)

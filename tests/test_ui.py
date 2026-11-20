@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -261,7 +262,7 @@ def test_builds_key_goes_to_the_repo_secret_and_is_never_echoed(client, monkeypa
 
     saved = []
     monkeypatch.setattr(repo_init, "set_secret", lambda cfg, key: saved.append(key))
-    key = "sk-ant-" + "a" * 30
+    key = "sk-ant-oat01-" + "a" * 30
     r = client.post("/api/builds/key", json={"key": f" {key}" + chr(10)}, headers=H)
     assert r.status_code == 200 and r.json() == {"saved": True} and key not in r.text
     assert saved == [key]
@@ -277,7 +278,7 @@ def test_builds_key_failure_is_a_fixed_phrase(client, monkeypatch):
         raise ActionsError("could not store the secret")
 
     monkeypatch.setattr(repo_init, "set_secret", boom)
-    key = "sk-ant-" + "a" * 30
+    key = "sk-ant-oat01-" + "a" * 30
     r = client.post("/api/builds/key", json={"key": key}, headers=H)
     assert r.status_code == 400 and "could not store the secret" in r.text and key not in r.text
 
@@ -381,3 +382,17 @@ def test_page_has_no_dead_build_image_action_and_shows_run_link(client):
     assert "build-image" not in html and "work folder" not in html
     for needle in ("Set up repo", ">Sync<", "run_url", "build-init-repo", "build-sync"):
         assert needle in html
+
+
+def test_builds_key_rejects_a_short_token_with_the_new_wording(client):
+    r = client.post("/api/builds/key", json={"key": "short"}, headers=H)
+    assert r.status_code == 400 and "Claude subscription token" in r.text
+
+
+def test_panel_asks_for_the_claude_subscription_token():
+    from radar.ui import app as ui_app
+
+    html = (Path(ui_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "Claude subscription token (daily builds)" in html
+    assert "claude setup-token" in html and "CLAUDE_CODE_OAUTH_TOKEN" in html
+    assert "Anthropic API key" not in html and "ANTHROPIC_API_KEY" not in html

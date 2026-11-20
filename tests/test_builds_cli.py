@@ -100,13 +100,13 @@ def test_build_gets_a_copy_of_the_result(cfg, monkeypatch):
     def build(cfg_, folder, result, **kw):
         result["items"].append("mutated")
         seen["done"] = True
-        return BuildRecord(day="d", status="skipped", reason="no API key")
+        return BuildRecord(day="d", status="skipped", reason="no token")
 
     daily_setup(cfg, monkeypatch, build)
     cli.cmd_daily(cfg, SimpleNamespace())
     assert seen["done"] and RESULT["items"] == [{"title": "T", "url": "https://example.org/x"}]
     stage = latest_run(cfg)["stages"][2]
-    assert stage["ok"] and stage["skipped"] and stage["error"] == "no API key"
+    assert stage["ok"] and stage["skipped"] and stage["error"] == "no token"
 
 
 def test_slow_build_inside_budget_keeps_its_status(cfg, monkeypatch):
@@ -238,7 +238,7 @@ def test_build_command_uses_latest_digest(cfg, monkeypatch, capsys):
     rec = BuildRecord(day="d", status="published", package="pkg", url="https://x/y")
     monkeypatch.setattr(run_mod, "run_build", fake_build(rec, seen))
     assert cli.cmd_build(cfg, build_args()) == 0
-    assert seen["folder"] == latest and seen["result"] == RESULT and seen["kw"] == {}
+    assert seen["folder"] == latest and seen["result"] == RESULT and seen["kw"] == {"retry": False}
     assert seen["locked"]["owner"] == "build"
     assert RunLock(cfg).holder() is None
     out = capsys.readouterr().out
@@ -276,6 +276,7 @@ def test_build_needs_retry_when_day_already_has_a_record(cfg, monkeypatch, capsy
     assert "folder" not in seen and "--retry" in capsys.readouterr().out
     assert cli.cmd_build(cfg, build_args(retry=True)) == 0
     assert seen["folder"] == folder
+    assert seen["kw"] == {"retry": True}  # --retry also re-dispatches over a building record
 
 
 def test_build_sync_finishes_records_and_holds_the_lock(cfg, monkeypatch, capsys):
@@ -374,7 +375,7 @@ def test_status_shows_skipped_and_optional_failures(cfg, capsys):
         started="2026-11-19T07:00:00",
         stages=[
             StageResult("scan", True, 1.0),
-            StageResult("build", True, 1.0, error="no API key", optional=True, skipped=True),
+            StageResult("build", True, 1.0, error="no token", optional=True, skipped=True),
             StageResult("podcast", False, 1.0, error="x", optional=True),
             StageResult("email", False, 1.0, error="x"),
         ],
@@ -383,7 +384,7 @@ def test_status_shows_skipped_and_optional_failures(cfg, capsys):
     cli.cmd_status(cfg, SimpleNamespace())
     out = capsys.readouterr().out
     assert "scan ok" in out
-    assert "build skipped: no API key" in out
+    assert "build skipped: no token" in out
     assert "podcast failed (optional)" in out
     assert "email FAILED" in out
 
@@ -588,3 +589,13 @@ def test_daily_in_separate_mode_syncs(cfg, monkeypatch):
     monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: synced.append(1) or [])
     assert cli.cmd_daily(cfg, SimpleNamespace()) == 0
     assert synced == [1]
+
+
+def test_builds_key_prompt_mentions_the_setup_token_command(cfg, monkeypatch, capsys):
+    from radar.builds import repo_init
+
+    monkeypatch.setattr(repo_init, "set_secret", lambda cfg_, key: None)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": f"{KEY}")
+    assert cli.cmd_builds_key(cfg, SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "claude setup-token" in out and "CLAUDE_CODE_OAUTH_TOKEN" in out and KEY not in out

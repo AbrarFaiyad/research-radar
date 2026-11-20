@@ -90,7 +90,7 @@ def _build_line(digest_folder: Path, repo: str = "") -> str:
         status = data.get("status")
         if status in ("published", "did_not_run"):
             line = f"**Daily build:** {data['package']} → {data['url']}"
-            return line + (" (did not run; see its README)" if status == "did_not_run" else "")
+            return line + (" (did not run; see the notebook)" if status == "did_not_run" else "")
         if status == "building":
             run_id = data.get("run_id")
             if (

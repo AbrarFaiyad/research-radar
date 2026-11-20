@@ -87,7 +87,7 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Connections | `src/radar/connections.py` | Reads LinkedIn's data export so connections stay out of the queue |
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
-| Daily builds | `src/radar/builds/` | `select` picks the item, `actions` starts the workflow run on GitHub and waits for it, `run` coordinates the build and writes the records, `repo_init` sets up the public repo and stores the API key secret, `scan` checks every file for leaks, and `template/` holds the workflow that runs in the public repo |
+| Daily builds | `src/radar/builds/` | `select` picks the item, `actions` starts the workflow run on GitHub and waits for it, `run` coordinates the build and writes the records, `repo_init` sets up the public repo and stores the subscription token secret, `scan` checks every file for leaks, and `template/` holds the workflow that runs in the public repo |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
 | Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
 | Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
@@ -242,7 +242,7 @@ You never need the command line after installing; every command here is a button
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
 | `radar daily` | Scan, digest, build (when enabled), and email as isolated stages, with a run record | Dashboard, Full daily run |
 | `radar build [folder] [--retry] [--sync] [--init-repo]` | Start the day's demo build on GitHub Actions from a digest. `--retry` runs a day that already has a record again. `--sync` finishes builds that were still running. `--init-repo` installs the workflow in the public repo once | Daily builds, Build now, Retry, Sync, Set up repo |
-| `radar builds-key` | Store the Anthropic API key as the `ANTHROPIC_API_KEY` secret of the daily-builds repo (hidden prompt) | Setup, Anthropic API key (daily builds) |
+| `radar builds-key` | Store the Claude subscription token as the `CLAUDE_CODE_OAUTH_TOKEN` secret of the daily-builds repo (hidden prompt). Create the token with `claude setup-token` | Setup, Claude subscription token (daily builds) |
 | `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
 | `radar status` | Database counts, queue size, latest digest, last run | Dashboard |
 | `radar demo` | Classify synthetic posts into `data/demo/` with the local model | Setup, Offline demo |
@@ -256,7 +256,7 @@ Codex reviews every candidate once, and saved posts older than three days (`back
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
 - **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
-- **Build isolation.** Builds run on a GitHub-hosted runner that is discarded afterwards, in a job with a read-only token. A second job holds the write token, never sees the API key, and never runs build code. It scans every file for keys, personal details, local paths, and oversized files before it commits. Tests check that only the public prompt and the folder name leave the PC.
+- **Build isolation.** Builds run on a GitHub-hosted runner that is discarded afterwards, in a job with a read-only token. A second job holds the write token, never sees the subscription token, and never runs build code. It scans every file for key patterns, local paths, and oversized files before it commits. Your computer checks the outgoing prompt for personal information before it sends it. Tests check that only the public prompt and the folder name leave the PC.
 - **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, only the redacted text is kept, and the wizard lets you keep it on your computer by drafting with the local model. The LinkedIn export is read in memory; only names, profile links, and dates are stored. Health checks mask email addresses and home-folder paths.
 - **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
@@ -307,7 +307,7 @@ To revoke access, delete the App Password in your Google account.
 
 ## Daily builds
 
-Reading about a package is not the same as using it. Once a day, Research Radar picks one open-source item from the digest. Claude Sonnet then builds a very small, complete demo notebook with it. The notebook is a learning kit that shows what the package is for and how to go from a blank folder to a result.
+Reading about a package is not the same as using it. Once a day, Research Radar picks one open-source item from the digest. Claude then builds a very small, complete demo notebook with it. The build uses your Claude subscription in three passes: Sonnet plans, Haiku implements, and Sonnet reviews. Each pass uses the latest model of its family. The notebook is a learning kit that shows what the package is for and how to go from a blank folder to a result.
 
 The build runs on GitHub Actions, not on your PC. Nothing is installed locally. Builds are published to one public GitHub repo. The feature is off by default.
 
@@ -321,15 +321,15 @@ Each build is one folder named `YYYY-MM-DD_<package>_<task>`, in lowercase with 
 - `output/`: small results, such as a PNG plot or a table.
 - `BUILD_LOG.md`: what Claude tried, what failed, and how it was fixed.
 
-The top-level README of the public repo lists every build with its date, package, and license. It also says whether the notebook ran.
+The top-level README of the public repo lists every build with its date, package, what it shows, and whether the notebook ran. A notebook that did not finish carries a banner at its top.
 
 ### How a build runs
 
 1. Research Radar picks the item and renders the build prompt from the item's public fields and the committed field profile.
 2. It starts the `build.yml` workflow in your daily-builds repo with `gh workflow run`. Only the prompt and the folder name are sent.
-3. The build job runs Claude Code with the prompt and your API key, then runs the notebook with papermill. Its token is read-only. The job times out after 60 minutes, and each notebook cell after 10 minutes.
-4. The publish job downloads the result. It has no API key and runs no build code. It rejects links and non-regular files, strips PNG metadata, scans every file, and commits as `github-actions[bot]` with UTC time.
-5. Research Radar waits for the run for up to 90 minutes. A run still going then is recorded as `building`, and the panel shows a link to it. The next daily run, or the **Sync** button, records its result.
+3. The build job runs Claude Code three times with the prompt and your subscription token: a Sonnet planning pass (10 minutes at most), a Haiku implementation pass (25 minutes), and a Sonnet review pass (15 minutes). A pass that fails or times out does not stop the next step. The job then runs the notebook with papermill. The job's GitHub token is read-only. The job times out after 60 minutes, and each notebook cell after 10 minutes.
+4. The publish job downloads the result. It has no subscription token and runs no build code. It rejects links and non-regular files, strips PNG metadata, scans every file, and commits as `github-actions[bot]` with UTC time.
+5. Research Radar waits for the run, by default 90 minutes (`poll_min` under `[builds]`). A run still going then is recorded as `building`, and the panel shows a link to it. The next daily run, or the **Sync** button, records its result.
 
 ### When it runs
 
@@ -343,15 +343,15 @@ The build takes the highest-ranked digest item that has a code link, an OSI-appr
 
 No personal information may leave your computer through a build. The rules are:
 
-- Only public data is sent. GitHub receives the selected item's public fields, the field profile as last committed to this repository, the build instructions, and the folder name. That profile is the one already public in this repository, so nothing new is exposed. The wizard and the Field profile tab change the working copy, so a build skips while `config/field_profile.md` has uncommitted changes. The database, queue, connections, CV, settings, email details, and browser profiles stay on your PC. The runner never sees them.
+- Only public data is sent. GitHub receives the selected item's public fields, the field profile as last committed to this repository, the build instructions, and the folder name. That profile is the committed profile in this repository (push it to make it public), so nothing beyond it is exposed. Before it sends anything, your computer checks the rendered prompt for your email addresses, user name, host name, home folder, local paths, and key patterns. If it finds one, the build is skipped. The runner has no list of your personal details, so this check cannot happen there. The wizard and the Field profile tab change the working copy, so a build skips while `config/field_profile.md` has uncommitted changes. The database, queue, connections, CV, settings, email details, and browser profiles stay on your PC. The runner never sees them.
 - The build job is untrusted. It has a read-only token, so a malicious package cannot push to the repo or change the workflow.
-- The build job can read the API key. Use a dedicated key with a low monthly spend limit, and use it for nothing else.
-- Runners have open internet. There is no allowlist, so build code can send data anywhere. That matters little because nothing personal is on the runner. The key is the one secret it holds.
-- The publish job never receives the API key and never runs build output.
-- The Actions logs of a public repo are public. They contain only the public prompt and the build output. GitHub masks the key.
-- Before any commit, every file is scanned for API keys, email addresses, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the build is blocked and not published. Only PNG and SVG images are allowed.
+- The build job can read the subscription token. The token gives access to your Claude subscription until you revoke it in your Claude account. Builds count against your subscription usage limits, and there is no spend cap. Revoke the token if anything looks wrong, and use it for nothing else.
+- Runners have open internet. There is no allowlist, so build code can send data anywhere. That matters little because nothing personal is on the runner. The token is the one secret it holds.
+- The publish job never receives the subscription token and never runs build output. A check in the build job looks for the token in the output, and the build is not published if it finds it.
+- The Actions logs of a public repo are public. They hold the step output and do not print the prompt. Masking hides only the exact secret text, so a logs page is not a safe place for the token. The Claude output of each pass goes to a file that is not uploaded.
+- Before any commit, every file is scanned for key patterns, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the build is blocked and not published. Only PNG and SVG images are allowed.
 - Commits are made by `github-actions[bot]`, so they carry no name, email, or time zone of yours.
-- A build whose notebook did not run is still published. Its README and the index label it "did not run".
+- A build whose notebook did not run is still published. Its notebook opens with a "did not run" banner, and the index says so.
 - The one commit made from your PC is the one-time repo setup. It carries the git name and GitHub noreply email you configure, so choose a name you are happy to publish.
 
 The scan has limits. It cannot detect data deliberately hidden in image pixels. The real protection is that the runner never holds anything personal. A person does not review a build before it is published.
@@ -362,7 +362,7 @@ The scan has limits. It cannot detect data deliberately hidden in image pixels. 
 2. Sign in with the GitHub CLI and add the `workflow` scope: `gh auth refresh -s workflow`.
 3. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`, shown at github.com/settings/emails). Settings and the setup refuse any other address. The name and email are used only for the one-time setup commit.
 4. On the Daily builds tab, press **Set up repo**. This commits the workflow and the leak-scan tools to the repo once.
-5. On the Setup tab, store the Anthropic API key. It is saved as the repo's encrypted `ANTHROPIC_API_KEY` secret and never stored on your PC. The panel never shows it again.
+5. Run `claude setup-token` on your PC and copy the token. On the Setup tab, paste it into Claude subscription token (daily builds), or run `radar builds-key`. It is saved as the repo's encrypted `CLAUDE_CODE_OAUTH_TOKEN` secret and never stored on your PC. The panel never shows it again.
 
 The checklist on the Setup tab shows each step as a check with a fix button. The Daily builds tab lists every build with its status and a link to its folder on GitHub, where the notebook and outputs are. It also has Build now, Sync, and Retry buttons.
 

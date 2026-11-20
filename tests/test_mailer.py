@@ -167,7 +167,7 @@ def test_email_build_line_did_not_run(tmp_path):
         tmp_path,
         {"status": "did_not_run", "package": "ase", "url": "https://github.com/o/r/x"},
     )
-    assert "**Daily build:** ase → https://github.com/o/r/x (did not run; see its README)" in body
+    assert "**Daily build:** ase → https://github.com/o/r/x (did not run; see the notebook)" in body
 
 
 def test_email_build_line_skipped_reason_only(tmp_path):

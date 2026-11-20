@@ -82,7 +82,7 @@ def _builds_probes(tmp_path, **kw):
         "repo_visibility": lambda repo: "PUBLIC",
         "gh_scopes": lambda: {"repo", "workflow"},
         "workflow_installed": lambda repo: True,
-        "secret_names": lambda repo: {"ANTHROPIC_API_KEY"},
+        "secret_names": lambda repo: {"CLAUDE_CODE_OAUTH_TOKEN"},
     }
     base.update(kw)
     return _probes(tmp_path, **base)
@@ -127,7 +127,7 @@ def test_builds_checks_all_green(cfg, tmp_path):
         "gh signed in with workflow scope",
         "daily-builds repo",
         "workflow installed",
-        "Anthropic key secret",
+        "Claude subscription token secret",
     ):
         assert checks[name].ok, name
 
@@ -156,7 +156,7 @@ def test_key_secret_check_offers_add_key(cfg, tmp_path):
     _on(cfg)
     for names in (set(), {"OTHER"}, None):
         c = _by_name(run_checks(cfg, _builds_probes(tmp_path, secret_names=lambda r, n=names: n)))[
-            "Anthropic key secret"
+            "Claude subscription token secret"
         ]
         assert not c.ok and c.action == "builds-key"
 
@@ -169,7 +169,7 @@ def test_probes_receive_the_configured_repo(cfg, tmp_path):
         _builds_probes(
             tmp_path,
             workflow_installed=lambda r: seen.append(("wf", r)) or True,
-            secret_names=lambda r: seen.append(("sec", r)) or {"ANTHROPIC_API_KEY"},
+            secret_names=lambda r: seen.append(("sec", r)) or {"CLAUDE_CODE_OAUTH_TOKEN"},
         ),
     )
     assert seen == [("wf", "someone/daily-builds"), ("sec", "someone/daily-builds")]
@@ -198,7 +198,7 @@ def test_default_probes_use_gh_with_minimal_env(monkeypatch):
             )
         if args[0] == "secret":
             return SimpleNamespace(
-                returncode=0, stdout='[{"name": "ANTHROPIC_API_KEY"}]', stderr=""
+                returncode=0, stdout='[{"name": "CLAUDE_CODE_OAUTH_TOKEN"}]', stderr=""
             )
         if args[0] == "repo":
             return SimpleNamespace(returncode=0, stdout='{"visibility": "PUBLIC"}', stderr="")
@@ -206,7 +206,7 @@ def test_default_probes_use_gh_with_minimal_env(monkeypatch):
 
     monkeypatch.setattr(actions, "gh", fake_gh)
     assert doctor._gh_scopes() == {"repo", "workflow"}
-    assert doctor._secret_names("o/r") == {"ANTHROPIC_API_KEY"}
+    assert doctor._secret_names("o/r") == {"CLAUDE_CODE_OAUTH_TOKEN"}
     assert doctor._repo_visibility("o/r") == "PUBLIC"
     assert doctor._workflow_installed("o/r") is True
     assert ["api", "repos/o/r/contents/.github/workflows/build.yml"] in calls

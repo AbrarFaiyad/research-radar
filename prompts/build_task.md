@@ -56,6 +56,6 @@ requirements.txt must include `papermill` and `ipykernel`, pinned like every oth
 - Never invent results. Run the demo and show its real output. If something fails, say so in the notebook and in BUILD_LOG.md.
 - Outputs under output/ are only small PNG, SVG, or CSV files. No archives, pickles, model weights, or other binaries. Each file under 5 MB, the whole folder under 20 MB.
 - Never write absolute paths, user names, host names, or anything about the machine you run on into any file, including notebook outputs and tracebacks. Use relative paths only.
-- Never copy credentials, API keys, or environment variables into any file or output.
+- Never copy credentials, tokens, API keys, or environment variables into any file or output.
 - Keep a short BUILD_LOG.md: what you tried, what failed, how it was fixed.
 - Put virtual environments, cloned repositories, and caches under /tmp, never in the current folder. Do not leave extra folders or caches behind (such as .ipynb_checkpoints or __pycache__).

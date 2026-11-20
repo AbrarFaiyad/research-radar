@@ -249,10 +249,10 @@ textarea.mid { min-height: 380px; }
   </div>
 
   <div class="card" style="margin-top:16px" id="build-key-card">
-    <h2>Anthropic API key (daily builds)</h2>
-    <p class="muted" style="margin-top:0">Daily builds call the Anthropic API. Use a dedicated key with a low monthly spend limit. It is stored as the encrypted secret <code>ANTHROPIC_API_KEY</code> in your daily-builds repo, never on this PC, and is never shown again. The build job can read it, so spend-limit it.</p>
-    <div class="field"><label for="b-key">API key <div class="help">paste to set or replace</div></label><input id="b-key" type="password" autocomplete="off" class="wide"></div>
-    <div class="row" style="margin-top:8px"><button class="btn primary" id="b-key-save">Save key</button></div>
+    <h2>Claude subscription token (daily builds)</h2>
+    <p class="muted" style="margin-top:0">Daily builds run on your Claude subscription and count against its usage limits. The token is stored as the encrypted secret <code>CLAUDE_CODE_OAUTH_TOKEN</code> in your daily-builds repo, never on this PC, and is never shown again. The build job can read it, and it gives access to your subscription until you revoke it in your Claude account, so revoke it if anything looks wrong.</p>
+    <div class="field"><label for="b-key">Claude subscription token (daily builds) <div class="help">run <code>claude setup-token</code> on your PC and paste the token; it is stored only as the repo secret</div></label><input id="b-key" type="password" autocomplete="off" class="wide"></div>
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="b-key-save">Save token</button></div>
   </div>
 
   <div class="card" style="margin-top:16px" id="email-card">
@@ -390,7 +390,7 @@ async function loadNext() {
 }
 const FIX_LABEL = {"setup-config": "Create", "setup-model": "Download model", "setup-chromium": "Install",
   "setup-codex": "Install", "login": "Sign in", "notebooklm-login": "Sign in", "email-password": "Set up",
-  "schedule": "Set time", "onboard": "Start", "builds-key": "Add key", "build-init-repo": "Set up repo"};
+  "schedule": "Set time", "onboard": "Start", "builds-key": "Add token", "build-init-repo": "Set up repo"};
 function fixButton(c) {
   if (c.ok || !c.action) return "<span></span>";
   if (/^https:/.test(c.action)) return `<a class="btn" href="${esc(c.action)}" target="_blank" rel="noopener">Open</a>`;
@@ -598,8 +598,8 @@ $("#b-sync").onclick = async () => { if (await startJob({action: "build-sync"}))
 $("#b-init").onclick = async () => { if (await startJob({action: "build-init-repo"})) loadBuilds(); };
 jobDone.push(j => { if (j.action.startsWith("build")) { loadBuilds(); loadChecks(); } });
 $("#b-key-save").onclick = async () => {
-  const el = $("#b-key"); if (!el.value.trim()) return toast("Paste the key first");
-  try { await api("/api/builds/key", {key: el.value}); el.value = ""; toast("API key saved"); loadChecks(); }
+  const el = $("#b-key"); if (!el.value.trim()) return toast("Paste the token first");
+  try { await api("/api/builds/key", {key: el.value}); el.value = ""; toast("Subscription token saved"); loadChecks(); }
   catch (e) { el.value = ""; toast(e.message); }
 };
 

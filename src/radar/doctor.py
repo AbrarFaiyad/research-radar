@@ -105,10 +105,9 @@ def _workflow_installed(repo: str) -> bool:
 
 
 def _secret_names(repo: str) -> set[str] | None:
-    data = _gh_json(["secret", "list", "-R", repo, "--json", "name"])
-    if not isinstance(data, list):
-        return None
-    return {str(x.get("name")) for x in data if isinstance(x, dict)}
+    from .builds import actions
+
+    return actions.secret_names(repo)
 
 
 def _dir_has_files(path: Path) -> bool:
@@ -270,10 +269,10 @@ def _builds_checks(cfg: Config, p: Probes) -> list[Check]:
     names = p.secret_names(repo) if repo else None
     out.append(
         Check(
-            "Anthropic key secret",
-            names is not None and "ANTHROPIC_API_KEY" in names,
-            "ANTHROPIC_API_KEY stored in the repo",
-            "paste the key on the Setup tab",
+            "Claude subscription token secret",
+            names is not None and "CLAUDE_CODE_OAUTH_TOKEN" in names,
+            "CLAUDE_CODE_OAUTH_TOKEN stored in the repo",
+            "run claude setup-token on your PC and paste the token on the Setup tab",
             action="builds-key",
         )
     )

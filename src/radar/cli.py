@@ -349,7 +349,7 @@ def cmd_build(cfg, args) -> int:
         return 0
     try:
         _sync_builds(cfg)  # otherwise a still-unrecorded publish could be built twice
-        rec = build_run.run_build(cfg, folder, result)
+        rec = build_run.run_build(cfg, folder, result, retry=args.retry)
     finally:
         lock.__exit__(None, None, None)
     _print_build(rec)
@@ -362,16 +362,20 @@ def cmd_builds_key(cfg, args) -> int:
     from .builds import repo_init
     from .builds.actions import ActionsError
 
-    print("Paste the Anthropic API key for daily builds (input is hidden).")
-    key = "".join(getpass.getpass("API key: ").split())
+    print(
+        "Run `claude setup-token` on your PC, then paste the Claude subscription token "
+        "for daily builds (input is hidden)."
+    )
+    key = "".join(getpass.getpass("Claude subscription token: ").split())
     if not key:
-        raise UserError("No key entered.")
+        raise UserError("No token entered.")
     try:
         repo_init.set_secret(cfg, key)
     except ActionsError as e:
         raise UserError(str(e)) from None
     print(
-        "Saved as the repo secret ANTHROPIC_API_KEY. Run the first build with `radar build --retry`."
+        "Saved as the repo secret CLAUDE_CODE_OAUTH_TOKEN. "
+        "Run the first build with `radar build --retry`."
     )
     return 0
 
@@ -631,7 +635,9 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     em.add_argument("--today-only", action="store_true", help="skip digests from earlier days")
     em.add_argument("--test", action="store_true", help="send a short test message only")
-    sub.add_parser("builds-key", help="store the Anthropic API key as the builds repo secret")
+    sub.add_parser(
+        "builds-key", help="store the Claude subscription token as the builds repo secret"
+    )
     bd = sub.add_parser("build", help="build the day's learning demo from a digest and publish it")
     bd.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     bd.add_argument("--retry", action="store_true", help="run again for a day that has a record")
