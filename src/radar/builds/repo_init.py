@@ -196,6 +196,8 @@ def init_repo(
         has_main = probe(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"])
         if has_main:
             g(["checkout", "--quiet", "-B", "main", "--track", "origin/main"])
+        elif g(["for-each-ref", "--count=1", "refs/remotes/origin/"]).strip():
+            raise ActionsError("the repository's default branch must be main")
         else:
             g(["symbolic-ref", "HEAD", "refs/heads/main"])
 

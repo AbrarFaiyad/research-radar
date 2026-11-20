@@ -28,6 +28,8 @@ GIT_TIMEOUT_S = 30
 NOT_COMMITTED = "field profile not committed"
 UNCOMMITTED = "field profile has uncommitted changes"
 STILL_RUNNING = "a build is still running"
+NOT_FOUND = "workflow started but run not found"
+UNREADABLE = "could not read the workflow run"
 TEMPLATE_RE = re.compile(r"\{\{(DAY|FIELD_PROFILE|ITEM_JSON)\}\}")
 
 
@@ -126,13 +128,15 @@ def read_record(cfg, day: str) -> BuildRecord | None:
         return None
 
 
-def _save(cfg, record: BuildRecord, digest_folder: Path | None, log: Callable) -> None:
+def _save(
+    cfg, record: BuildRecord, digest_folder: Path | None, log: Callable, track: bool = True
+) -> None:
     """Write the record; add finished builds to the history (not `building`)."""
     try:
         _write_record(record, digest_folder, cfg.builds_dir / "records")
     except OSError:
         log("builds: could not write the build record")
-    if record.package and record.status not in ("building", "skipped"):
+    if track and record.package and record.status not in ("building", "skipped"):
         try:
             history = History(cfg.builds_dir / "history.json")
             if record.url:
@@ -204,12 +208,28 @@ def run_build(
     try:
         log(f"builds: starting {cand.package}")
         actions.dispatch(cfg, folder, prompt)
-        run_id = actions.find_run(cfg, folder, since)
     except ActionsError as exc:
         return finish("failed", str(exc))
+    try:
+        run_id = actions.find_run(cfg, folder, since)
+    except ActionsError:
+        # The workflow may still publish, so this is not a history attempt.
+        record = BuildRecord(
+            day,
+            "failed",
+            cand.package,
+            folder,
+            reason=NOT_FOUND,
+            seconds=round(time.monotonic() - start, 1),
+        )
+        _save(cfg, record, Path(digest_folder), log, track=False)
+        return record
     # Written now, so a crash or a restart while waiting never starts a second build.
     _save(
-        cfg, BuildRecord(day, "building", cand.package, folder, run_id=run_id), digest_folder, log
+        cfg,
+        BuildRecord(day, "building", cand.package, folder, run_id=run_id),
+        Path(digest_folder),
+        log,
     )
 
     try:
@@ -251,6 +271,8 @@ def sync_builds(cfg, actions=actions_module, log: Callable = print) -> list[Buil
             if state == "building":
                 continue
             status, reason = actions.outcome(cfg, rec.run_id, rec.folder)
+            if reason == UNREADABLE:
+                continue  # keep it building; the next sync tries again
         except ActionsError:
             log(f"builds: could not check the run for {rec.day}")
             continue

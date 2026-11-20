@@ -312,3 +312,16 @@ def test_module_constants_point_at_the_template_files():
     assert repo_init.SCAN_SRC == Path(scan.__file__)
     for _, src in (*repo_init.MANAGED, repo_init.README):
         assert src.is_file()
+
+
+def test_origin_without_main_is_refused(icfg, origin, tmp_path):
+    other = tmp_path / "other"
+    sh("clone", "--quiet", str(origin), str(other), cwd=tmp_path)
+    sh("checkout", "-q", "-b", "master", cwd=other)
+    (other / "x.txt").write_text("x", encoding="utf-8")
+    sh("add", "x.txt", cwd=other)
+    sh("-c", "user.name=o", "-c", "user.email=o@x.y", "commit", "-m", "x", cwd=other)
+    sh("push", "origin", "master", cwd=other)
+    with pytest.raises(ActionsError, match="default branch must be main"):
+        go(icfg)
+    assert sh("for-each-ref", "--format=%(refname)", cwd=origin).split() == ["refs/heads/master"]

@@ -199,9 +199,8 @@ def test_failed_outcome(on_cfg, digest, result):
     assert history(on_cfg)["attempts"][0]["status"] == "failed"
 
 
-@pytest.mark.parametrize("step", ["dispatch_exc", "find_exc"])
-def test_start_errors_fail_with_the_fixed_phrase(on_cfg, digest, result, step):
-    fake = FakeActions(**{step: ActionsError("could not start the workflow")})
+def test_dispatch_error_fails_with_the_fixed_phrase(on_cfg, digest, result):
+    fake = FakeActions(dispatch_exc=ActionsError("could not start the workflow"))
     rec = go(on_cfg, digest, result, actions=fake)
     assert (rec.status, rec.reason) == ("failed", "could not start the workflow")
     assert rec.run_id is None
@@ -454,3 +453,25 @@ def test_prompt_sends_venvs_and_clones_to_tmp():
 
     text = (REPO_ROOT / "prompts" / "build_task.md").read_text(encoding="utf-8")
     assert "virtual environments" in text and "/tmp" in text
+
+
+def test_run_not_found_is_failed_without_a_history_attempt(on_cfg, digest, result):
+    fake = FakeActions(find_exc=ActionsError("could not find the workflow run"))
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("failed", "workflow started but run not found")
+    assert records(on_cfg)["reason"] == "workflow started but run not found"
+    assert history(on_cfg) == {"published": [], "attempts": []}
+
+
+def test_sync_keeps_building_when_the_run_cannot_be_read(on_cfg, digest, result):
+    start_building(on_cfg, digest, result)
+    fake = FakeActions(outcome=("failed", "could not read the workflow run"))
+    assert sync_builds(on_cfg, actions=fake, log=lambda *_: None) == []
+    assert records(on_cfg)["status"] == "building"
+    assert history(on_cfg) == {"published": [], "attempts": []}
+
+
+def test_building_record_is_written_for_a_string_digest_folder(on_cfg, digest, result):
+    rec = go(on_cfg, str(digest), result, actions=FakeActions(state="building"))
+    assert rec.status == "building"
+    assert json.loads((digest / "build.json").read_text("utf-8"))["status"] == "building"

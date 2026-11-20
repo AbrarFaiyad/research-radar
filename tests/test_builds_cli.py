@@ -539,3 +539,52 @@ def test_separate_mode_does_not_wait_for_other_jobs(cfg, monkeypatch, daily_lock
     with pytest.raises(LockHeld):
         cli.cmd_build(cfg, build_args())
     assert clock.sleeps == []
+
+
+def test_build_command_syncs_inside_the_lock_before_building(cfg, monkeypatch):
+    order = []
+    make_digest(cfg)
+
+    def sync(cfg_, **kw):
+        order.append(("sync", RunLock(cfg_).holder()["owner"]))
+        return []
+
+    def build(cfg_, folder, result, **kw):
+        order.append(("build", None))
+        return BuildRecord(day="d", status="published", package="p")
+
+    monkeypatch.setattr(run_mod, "sync_builds", sync)
+    monkeypatch.setattr(run_mod, "run_build", build)
+    assert cli.cmd_build(cfg, build_args()) == 0
+    assert order == [("sync", "build"), ("build", None)]
+
+
+def test_build_command_survives_a_sync_crash(cfg, monkeypatch):
+    make_digest(cfg)
+
+    def boom(cfg_, **kw):
+        raise RuntimeError("gh exploded")
+
+    monkeypatch.setattr(run_mod, "sync_builds", boom)
+    monkeypatch.setattr(run_mod, "run_build", fake_build(BuildRecord("d", "published"), {}))
+    assert cli.cmd_build(cfg, build_args()) == 0
+
+
+def test_daily_without_new_digest_still_syncs(cfg, monkeypatch):
+    synced = []
+    daily_setup(cfg, monkeypatch, lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: synced.append(1) or [])
+    import radar.digest
+
+    monkeypatch.setattr(radar.digest, "run_digest", lambda *a, **k: None)
+    cli.cmd_daily(cfg, SimpleNamespace())
+    assert synced == [1]
+    assert latest_run(cfg)["stages"][2]["skipped"]
+
+
+def test_daily_in_separate_mode_syncs(cfg, monkeypatch):
+    synced = []
+    daily_setup(cfg, monkeypatch, lambda *a, **k: None, mode="separate")
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: synced.append(1) or [])
+    assert cli.cmd_daily(cfg, SimpleNamespace()) == 0
+    assert synced == [1]

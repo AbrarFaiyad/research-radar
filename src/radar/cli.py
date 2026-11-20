@@ -92,6 +92,16 @@ def _audio_maker(cfg: Config):
 BUILD_SETUP_MIN = 10
 
 
+def _sync_builds(cfg: Config) -> None:
+    """Finish unfinished builds; a failure here never stops anything else."""
+    from .builds import run as build_run
+
+    try:
+        build_run.sync_builds(cfg, log=print)
+    except Exception as e:  # noqa: BLE001
+        print(f"builds: sync crashed: {e.__class__.__name__}")
+
+
 class DailyBuild:
     """The build that runs beside the podcast in the daily run (mode = with_digest).
 
@@ -114,10 +124,7 @@ class DailyBuild:
     def _run(self, folder: Path, result: dict) -> None:
         from .builds import run as build_run
 
-        try:  # finish yesterday's unfinished builds first; a failure here never stops today's
-            build_run.sync_builds(self.cfg, log=print)
-        except Exception as e:  # noqa: BLE001
-            print(f"builds: sync crashed: {e.__class__.__name__}")
+        _sync_builds(self.cfg)  # finish unfinished builds first
         try:
             self.record = build_run.run_build(self.cfg, folder, result, log=print)
         except Exception as e:  # noqa: BLE001 - a build must never break the daily run
@@ -128,6 +135,7 @@ class DailyBuild:
         from .builds.run import BuildRecord
 
         if self.thread is None:
+            _sync_builds(self.cfg)  # no new digest today, but unfinished builds still get closed
             raise StageSkipped("no new digest to build from")
         budget_min = self.cfg.builds.poll_min + BUILD_SETUP_MIN
         self.thread.join(max(budget_min, 0) * 60)
@@ -340,6 +348,7 @@ def cmd_build(cfg, args) -> int:
         _print_build(build_run.record_skip(cfg, today, DAILY_BUSY, folder))
         return 0
     try:
+        _sync_builds(cfg)  # otherwise a still-unrecorded publish could be built twice
         rec = build_run.run_build(cfg, folder, result)
     finally:
         lock.__exit__(None, None, None)
@@ -462,6 +471,8 @@ def cmd_daily(cfg, args) -> int:
     if cfg.email.enabled:  # after the build, so the email can report it
         stages["email"] = lambda: stage_email(cfg, today_only=True)
     with RunLock(cfg, owner="daily"):
+        if cfg.builds.enabled and not build:
+            _sync_builds(cfg)  # separate mode: the build command syncs too, but not every day
         rec = run_stages(stages, optional={"build"} if build else set())
     path = save_run(cfg, rec)
     print(f"run {'ok' if rec.ok else 'had failures'}: {path}")
