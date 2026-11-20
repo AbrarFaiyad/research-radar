@@ -35,6 +35,7 @@ _DIGEST_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 _PROFILE_MAX = 50_000
 _BUILD_ACTIONS = ("build", "build-retry", "build-sync", "build-init-repo")
 _KEY_MIN = 20
+_GITHUB = "https://github.com/"
 
 
 def create_app(
@@ -497,6 +498,22 @@ def create_app(
             raise HTTPException(404, "no such digest")
         return folder
 
+    def podcast_record(folder: Path) -> dict | None:
+        """The publish result for the panel: status, a release link only if it is a GitHub
+        address, and the reason for a skip or failure."""
+        try:
+            rec = json.loads((folder / "podcast.json").read_text(encoding="utf-8"))
+            status, page = rec["status"], rec.get("page")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if not isinstance(status, str):
+            return None
+        ok = status == "published" and isinstance(page, str) and page.startswith(_GITHUB)
+        out: dict = {"status": status, "page": page if ok else None}
+        if status != "published" and isinstance(rec.get("reason"), str):
+            out["reason"] = rec["reason"]
+        return out
+
     @app.get("/api/digests")
     def list_digests() -> list[dict]:
         out = []
@@ -525,6 +542,7 @@ def create_app(
                     "notebook": url_file.read_text(encoding="utf-8").strip()
                     if url_file.exists()
                     else None,
+                    "podcast": podcast_record(folder),
                 }
             )
         return out

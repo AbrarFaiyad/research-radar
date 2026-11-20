@@ -107,6 +107,18 @@ def _build_line(digest_folder: Path, repo: str = "") -> str:
     return ""
 
 
+def _podcast_line(digest_folder: Path) -> str:
+    """ "Podcast online: <page>" from podcast.json, only for a published GitHub release page."""
+    try:
+        data = json.loads((digest_folder / "podcast.json").read_text(encoding="utf-8"))
+        page = data.get("page")
+        if data.get("status") == "published" and str(page).startswith("https://github.com/"):
+            return f"Podcast online: {page}"
+    except (OSError, ValueError, AttributeError):
+        pass
+    return ""
+
+
 def compose_daily(
     cfg: EmailCfg,
     digest_folder: Path | None,
@@ -125,6 +137,9 @@ def compose_daily(
                 f"**Podcast:** attached, and playable in NotebookLM: "
                 f"<{link_file.read_text(encoding='utf-8').strip()}>"
             )
+        podcast_line = _podcast_line(digest_folder)
+        if podcast_line:
+            parts.append(podcast_line)
         build_line = _build_line(digest_folder, build_repo)
         if build_line:
             parts.append(build_line)

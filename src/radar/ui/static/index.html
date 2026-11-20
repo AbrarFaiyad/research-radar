@@ -314,6 +314,10 @@ textarea.mid { min-height: 380px; }
 </section>
 
 <section id="digests" class="tab">
+  <div class="row" style="margin-bottom:12px">
+    <button class="btn" id="p-init">Set up podcasts repo</button>
+    <span class="muted">Publishes each day's podcast as a release in your public podcasts repo. Turn it on in Settings first.</span>
+  </div>
   <div class="split">
     <div class="dlist" id="d-list"><p class="muted">Loading…</p></div>
     <div class="digest" id="d-view"><p class="muted">Pick a digest.</p></div>
@@ -390,7 +394,7 @@ async function loadNext() {
 }
 const FIX_LABEL = {"setup-config": "Create", "setup-model": "Download model", "setup-chromium": "Install",
   "setup-codex": "Install", "login": "Sign in", "notebooklm-login": "Sign in", "email-password": "Set up",
-  "schedule": "Set time", "onboard": "Start", "builds-key": "Add token", "build-init-repo": "Set up repo"};
+  "schedule": "Set time", "onboard": "Start", "builds-key": "Add token", "build-init-repo": "Set up repo", "podcast-init-repo": "Set up repo"};
 function fixButton(c) {
   if (c.ok || !c.action) return "<span></span>";
   if (/^https:/.test(c.action)) return `<a class="btn" href="${esc(c.action)}" target="_blank" rel="noopener">Open</a>`;
@@ -488,21 +492,26 @@ async function loadSettings() {
   const bySec = {}; schema.forEach(f => (bySec[f.section] ||= []).push(f));
   const LABELS = {profile: "Reader", scan: "Feed scan", browser: "Agent browser", llm: "Local model",
     digest: "Codex digest", notebooklm: "NotebookLM podcast", email: "Daily email", builds: "Daily builds", podcasts: "Podcast publishing"};
-  $("#settings-form").innerHTML = Object.entries(bySec).map(([sec, fs]) => `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.map(f => {
+  const fieldRow = f => {
     const v = d.values[f.id]; let input;
     if (f.kind === "bool") input = `<input type="checkbox" name="${f.id}" ${v ? "checked" : ""}>`;
     else if (f.kind === "choice") input = `<select name="${f.id}">${f.choices.map(c => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
     else if (f.kind === "int" || f.kind === "float") input = `<input type="number" name="${f.id}" value="${esc(v)}" ${f.lo != null ? `min="${f.lo}"` : ""} ${f.hi != null ? `max="${f.hi}"` : ""} step="${f.kind === "int" ? 1 : "any"}" style="width:140px">`;
+    else if (f.kind === "lines") input = `<textarea name="${f.id}" rows="4" class="short" spellcheck="false">${esc((v || []).join("\n"))}</textarea>`;
     else input = `<input type="${f.kind === "email" ? "email" : "text"}" name="${f.id}" value="${esc(v)}">`;
     return `<div class="field"><label for="${f.id}">${esc(f.label)}${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}</label><div>${input}<div class="err" data-err="${f.id}"></div></div></div>`;
-  }).join("")}</fieldset>`).join("");
+  };
+  $("#settings-form").innerHTML = Object.entries(bySec).map(([sec, fs]) => {
+    const adv = fs.filter(f => f.advanced);
+    return `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.filter(f => !f.advanced).map(fieldRow).join("")}${adv.length ? `<details style="margin:0 0 10px"><summary class="muted" style="cursor:pointer">Advanced</summary>${adv.map(fieldRow).join("")}</details>` : ""}</fieldset>`;
+  }).join("");
 }
 $("#settings-save").onclick = async () => {
   const body = {}; schema.forEach(f => { const el = $(`[name="${f.id}"]`); if (!el) return;
     body[f.id] = f.kind === "bool" ? el.checked : el.value; });
   $$("[data-err]").forEach(e => e.textContent = "");
   try { await api("/api/settings", body); toast("Settings saved"); }
-  catch (e) { const errs = e.data?.errors || {}; Object.entries(errs).forEach(([k, m]) => { const el = $(`[data-err="${k}"]`); if (el) el.textContent = m; });
+  catch (e) { const errs = e.data?.errors || {}; Object.entries(errs).forEach(([k, m]) => { const el = $(`[data-err="${k}"]`); if (el) { el.textContent = m; const dt = el.closest("details"); if (dt) dt.open = true; } });
     toast(Object.keys(errs).length ? "Fix the highlighted settings" : e.message); }
 };
 
@@ -552,16 +561,27 @@ async function loadDigests() {
   $$("[data-d]").forEach(b => b.onclick = () => showDigest(b.dataset.d, ds.find(x => x.name === b.dataset.d), b));
   if (ds.length) $$("[data-d]")[0].click();
 }
+function podcastLine(p) {
+  if (!p) return "";
+  if (p.status === "published" && p.page && p.page.startsWith("https://github.com/"))
+    return `<p><a href="${esc(p.page)}" target="_blank" rel="noopener">Podcast release on GitHub</a></p>`;
+  return p.status === "published" ? "" : `<p class="muted">Podcast ${esc(p.status)}${p.reason ? `: ${esc(p.reason)}` : ""}</p>`;
+}
 async function showDigest(name, meta, btn) {
   $$("[data-d]").forEach(x => x.classList.toggle("active", x === btn));
   const d = await api(`/api/digests/${encodeURIComponent(name)}`);
   $("#d-view").innerHTML = `<div class="row" style="margin:14px 0 4px">
       <button class="btn" data-dact="podcast">${meta.audio ? "Regenerate podcast" : "Make podcast"}</button>
-      <button class="btn" data-dact="email">Email this digest</button></div>
+      <button class="btn" data-dact="email">Email this digest</button>
+      ${meta.audio && meta.podcast?.status !== "published" ? `<button class="btn" data-dact="podcast-publish">Publish podcast</button>` : ""}</div>
+    ${podcastLine(meta.podcast)}
     ${meta.audio ? `<audio controls preload="none" src="/api/digests/${encodeURIComponent(name)}/audio"></audio>` : `<p class="muted">No podcast for this digest.</p>`}
     ${meta.notebook ? `<p><a href="${esc(meta.notebook)}" target="_blank" rel="noopener">Open in NotebookLM</a></p>` : ""}${d.html}`;
   $$("[data-dact]").forEach(b => b.onclick = () => startJob({action: b.dataset.dact, folder: name}));
 }
+
+$("#p-init").onclick = async () => { if (await startJob({action: "podcast-init-repo"})) loadChecks(); };
+jobDone.push(j => { if (j.action.startsWith("podcast")) { if ($("#digests").classList.contains("active")) loadDigests(); loadChecks(); } });
 
 // ---- daily builds
 const BUILD_STATUS = {published: "published", did_not_run: "did not run", blocked: "blocked", failed: "failed", skipped: "skipped", building: "building"};

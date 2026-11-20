@@ -119,10 +119,10 @@ Open it with the **Research Radar** shortcut on the desktop or in the Start menu
 | Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the run history with each stage's result. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
 | Setup | Build your field profile with the wizard (below). Work through a checklist of prerequisites, each with a button that fixes it: create the config, download the local model, install the agent browser and Codex, sign in to Codex, LinkedIn, and NotebookLM. Import your LinkedIn connections. Store the Gmail App Password and send a test email. |
 | Schedule | Change the daily run time or switch it off. |
-| Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
+| Settings | Edit every key of `config/config.toml` in a validated form. Technical keys sit under a collapsed Advanced group in each section: the browser server command and arguments (one per line), the feed address, the Ollama address, the Codex command, the mail server and port, and the build records folder. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
 | Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
 | Connection queue | **Send** opens the person's profile in your own browser; you click Connect there, then confirm in the panel ("Yes, sent" or "Already connected"). **Skip** drops them, and **Undo** brings them back. The agent never acts on LinkedIn. Download the list as CSV. |
-| Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, or email a digest again. |
+| Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, publish it to GitHub, or email a digest again. A published podcast shows a link to its release. |
 
 ### Setup wizard
 
@@ -239,6 +239,8 @@ You never need the command line after installing; every command here is a button
 | `radar reclassify` | Re-judge stored posts with the current profile; newly relevant posts get their links resolved | Field profile, Save and re-judge |
 | `radar digest [--no-audio]` | Codex selects, sources, and summarizes the strongest 5 to 15 undigested posts, then NotebookLM makes the podcast | Dashboard, Digest |
 | `radar podcast [folder]` | Make the podcast again for a digest | Digests, Make podcast |
+| `radar podcast [folder] --publish` | Publish a digest's episode as a release in the podcasts repo. A day that was skipped or failed can be retried | Digests, Publish podcast |
+| `radar podcast --init-repo` | Create the public podcasts repo and its README if missing | Digests, Set up podcasts repo |
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
 | `radar daily` | Scan, digest, build (when enabled), and email as isolated stages, with a run record | Dashboard, Full daily run |
 | `radar build [folder] [--retry] [--sync] [--init-repo]` | Start the day's demo build on GitHub Actions from a digest. `--retry` runs a day that already has a record again. `--sync` finishes builds that were still running. `--init-repo` installs the workflow in the public repo once | Daily builds, Build now, Retry, Sync, Set up repo |
@@ -304,6 +306,28 @@ Email goes out through Gmail SMTP with an App Password. An App Password is a 16-
 3. Press **Send a test email**.
 
 To revoke access, delete the App Password in your Google account.
+
+## Daily podcasts
+
+The daily run can publish each podcast episode to GitHub. The feature is off by default.
+
+What is published, for each day:
+
+- the episode audio file, converted to a smaller MP3 when it is too large for email;
+- a title made of the date and the digest headline;
+- the release notes, which list each kept item's title and its primary link.
+
+Where it goes: one release per day, tagged with the digest date, in a public repo that you own. The release page is `https://github.com/<owner>/<repo>/releases/tag/<date>`. The Digests tab links to it, and the daily email gets a "Podcast online" line.
+
+Privacy: the audio is a NotebookLM discussion of public research news. Your field profile, your posts, your connection queue and your local paths are not published. Before publishing, the title and notes are checked for personal information, such as your name, email address, or local paths. If the check finds any, the day is skipped and the reason is shown. A public repo is visible to everyone, so do not point the setting at a private repo you want to keep private.
+
+Set up:
+
+1. On the Settings tab, under Podcast publishing, turn the feature on and enter the repo as `owner/name`.
+2. On the Digests tab, press **Set up podcasts repo**. This creates the public repo with a short README if it does not exist.
+3. Run the daily run, or press **Publish podcast** on a digest. The Setup tab shows a "daily-podcasts repo" check once the feature is on.
+
+A day that was skipped or failed can be published again with **Publish podcast**.
 
 ## Daily builds
 

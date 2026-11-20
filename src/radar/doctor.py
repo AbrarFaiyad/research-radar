@@ -218,6 +218,8 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
         )
     if cfg.builds.enabled:
         out += _builds_checks(cfg, p)
+    if cfg.podcasts.enabled:
+        out.append(_podcasts_check(cfg, p))
     out.append(
         Check(
             "daily schedule",
@@ -277,6 +279,18 @@ def _builds_checks(cfg: Config, p: Probes) -> list[Check]:
         )
     )
     return out
+
+
+def _podcasts_check(cfg: Config, p: Probes) -> Check:
+    repo = cfg.podcasts.repo
+    visibility = p.repo_visibility(repo) if repo else None
+    return Check(
+        "daily-podcasts repo",
+        visibility == "PUBLIC",
+        repo or "no repo set",
+        "set [podcasts] repo = owner/name, then press Set up podcasts repo in the panel",
+        action="podcast-init-repo",
+    )
 
 
 _EMAIL = re.compile(r"\b([A-Za-z0-9])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
