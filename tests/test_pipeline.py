@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from radar.pipeline import LockHeld, RunLock, latest_run, run_stages, save_run
+from radar.pipeline import LockHeld, RunLock, StageSkipped, latest_run, run_stages, save_run
 
 
 def test_failed_stage_does_not_stop_later_stages(cfg):
@@ -107,3 +107,29 @@ def test_lock_held_by_another_live_process(cfg, tmp_path):
     # The killed child's lock is now stale and can be taken over.
     with RunLock(cfg):
         pass
+
+
+def _boom():
+    raise RuntimeError("boom")
+
+
+def test_optional_stage_failure_keeps_run_ok():
+    rec = run_stages({"a": lambda: {}, "b": _boom}, log=lambda _: None, optional={"b"})
+    assert rec.ok and not rec.stages[1].ok and rec.stages[1].optional
+
+
+def test_required_stage_failure_still_fails_run():
+    rec = run_stages({"a": _boom, "b": lambda: {}}, log=lambda _: None, optional={"b"})
+    assert not rec.ok and not rec.stages[0].optional
+
+
+def test_stage_skipped_is_recorded():
+    def skip():
+        raise StageSkipped("docker not running")
+
+    logs = []
+    rec = run_stages({"build": skip}, log=logs.append, optional={"build"})
+    assert rec.ok and rec.stages[0].skipped and rec.stages[0].error == "docker not running"
+    assert rec.stages[0].ok
+    assert any("skipped: docker not running" in line for line in logs)
+    assert not any("FAILED" in line for line in logs)
