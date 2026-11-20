@@ -465,7 +465,9 @@ def apply_profile(cfg: Config, reader: str, profile: str) -> Path | None:
     tmp.write_text(profile, encoding="utf-8")
     os.replace(tmp, cfg.field_profile)
     settings.save(cfg.root, {"profile.reader": reader})
+    # The applied text now lives in config/field_profile.md, where it can be edited further.
+    # Clear the drafts so a later visit cannot re-apply a stale one over those edits.
     state = load_state(cfg)
-    state["applied_at"] = _now()
+    state.update(applied_at=_now(), draft=None, refined=None, calibration=None, corrections={})
     save_state(cfg, state)
     return backup

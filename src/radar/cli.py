@@ -1,7 +1,7 @@
 """Research Radar command line.
 
 Pipeline:  scan | reclassify | digest | podcast | email | daily
-Setup:     onboard | setup | login | notebooklm-login | email-setup | doctor
+Setup:     onboard | setup | connections | login | notebooklm-login | email-setup | doctor
 Inspect:   status | queue | demo | ui
 
 Everything here also has a button in the control panel (`radar ui`); the panel runs these
@@ -305,6 +305,28 @@ def cmd_queue(cfg, args) -> int:
     return 0
 
 
+def cmd_connections(cfg, args) -> int:
+    from .connections import read_export
+    from .queue import write_queue
+
+    path = Path(args.file)
+    try:
+        conns, pending = read_export(path.name, path.read_bytes())
+    except (OSError, ValueError) as e:
+        raise UserError(str(e)) from None
+    store = Store(cfg.db_path)
+    try:
+        res = store.import_connections(conns, pending)
+        write_queue(store, cfg.queue_dir)
+    finally:
+        store.close()
+    print(
+        f"imported {res['connections']} connections and {res['pending']} pending invitations; "
+        f"{res['removed_from_queue']} people left the queue"
+    )
+    return 0
+
+
 def cmd_login(cfg, args) -> int:
     from .scanner import login_flow
 
@@ -418,6 +440,9 @@ def build_parser() -> argparse.ArgumentParser:
     ob.add_argument("step", choices=["draft", "calibrate", "refine"])
     ob.add_argument("--source", choices=["live", "stored"], default="live")
     ob.add_argument("--max-posts", type=int, default=40)
+    cn = sub.add_parser("connections", help="import LinkedIn's Connections.csv export")
+    cn.add_argument("action", choices=["import"])
+    cn.add_argument("file", help="LinkedIn data export ZIP, Connections.csv, or Invitations.csv")
     st = sub.add_parser("setup", help="install or sign in to a prerequisite")
     st.add_argument("what", choices=["config", "model", "chromium", "codex", "codex-login"])
     sub.add_parser("daily", help="scan, digest, email; isolated stages and a run record")
@@ -440,6 +465,7 @@ HANDLERS = {
     "notebooklm-login": cmd_notebooklm_login,
     "email-setup": cmd_email_setup,
     "onboard": cmd_onboard,
+    "connections": cmd_connections,
     "setup": cmd_setup,
     "email": cmd_email,
     "daily": cmd_daily,

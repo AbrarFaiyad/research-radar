@@ -107,11 +107,11 @@ Open it with the **Research Radar** shortcut on the desktop or in the Start menu
 | Tab | What you can do |
 |---|---|
 | Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the run history with each stage's result. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
-| Setup | Build your field profile with the wizard (below). Work through a checklist of prerequisites, each with a button that fixes it: create the config, download the local model, install the agent browser and Codex, sign in to Codex, LinkedIn, and NotebookLM. Store the Gmail App Password and send a test email. |
+| Setup | Build your field profile with the wizard (below). Work through a checklist of prerequisites, each with a button that fixes it: create the config, download the local model, install the agent browser and Codex, sign in to Codex, LinkedIn, and NotebookLM. Import your LinkedIn connections. Store the Gmail App Password and send a test email. |
 | Schedule | Change the daily run time or switch it off. |
 | Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
 | Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
-| Connection queue | **Send** opens the person's profile in your own browser; you click Connect there, then confirm in the panel and the person is marked sent. **Skip** drops them, and **Undo** brings them back. The agent never acts on LinkedIn. Download the list as CSV. |
+| Connection queue | **Send** opens the person's profile in your own browser; you click Connect there, then confirm in the panel ("Yes, sent" or "Already connected"). **Skip** drops them, and **Undo** brings them back. The agent never acts on LinkedIn. Download the list as CSV. |
 | Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, or email a digest again. |
 
 ### Setup wizard
@@ -196,7 +196,8 @@ The panel opens on the Setup tab.
 1. **Your field.** Run the [setup wizard](#setup-wizard). Drop in your CV, review the draft, test it on real posts, and approve it.
 2. **Checklist.** Press the button next to each item marked ✗. Usually that means downloading the local model (about 6.6 GB), installing the agent browser and Codex, and signing in to Codex, LinkedIn, and NotebookLM. Sign-ins open a browser window where you type your own password; the agent never sees it.
 3. **Daily email.** Enter your Gmail address and a [Gmail App Password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. Turn the daily email on and press **Send a test email**.
-4. **Schedule.** On the Schedule tab, pick a time and save.
+4. **Connections.** Request your data from LinkedIn ([Get a copy of your data](https://www.linkedin.com/mypreferences/d/download-my-data), pick Connections and Invitations) and drop the archive under Your connections. The queue then leaves out everyone you are connected to or have already invited. Each Send or "Already connected" in the queue keeps that list current.
+5. **Schedule.** On the Schedule tab, pick a time and save.
 
 To try a full run straight away, press **Full daily run** on the Dashboard and watch the log.
 
@@ -220,6 +221,7 @@ You never need the command line after installing; every command here is a button
 | `radar setup config` / `model` / `chromium` / `codex` / `codex-login` | Create the config, pull the local model, install the agent browser or Codex, sign in to Codex | Setup, checklist |
 | `radar login`, `radar notebooklm-login` | Sign in to LinkedIn or Google in the agent browser | Setup, checklist |
 | `radar email-setup` | Store the Gmail App Password (hidden prompt) | Setup, Daily email |
+| `radar connections import <file>` | Load LinkedIn's data export (ZIP or Connections.csv) so connections never enter the queue | Setup, Your connections |
 | `radar doctor` | Check every prerequisite and print the fix for each gap | Setup, checklist |
 | `radar scan [--max-posts N]` | Scan the feed, classify new posts, refresh the queue | Dashboard, Scan feed |
 | `radar reclassify` | Re-judge stored posts with the current profile; newly relevant posts get their links resolved | Field profile, Save and re-judge |

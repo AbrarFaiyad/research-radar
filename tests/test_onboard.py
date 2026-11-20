@@ -184,7 +184,12 @@ def test_corrections_keep_only_flips_and_refine_sends_them(ocfg):
 
 
 def test_apply_backs_up_and_saves_reader(ocfg, root):
+    state = onboard.empty_state()
+    state.update(notes="keep me", refined={"reader": "r", "profile": PROFILE})
+    onboard.save_state(ocfg, state)
     backup = onboard.apply_profile(ocfg, "  a catalysis   PhD student ", PROFILE)
+    after = onboard.load_state(ocfg)  # drafts cleared so a stale one cannot be re-applied
+    assert after["refined"] is None and after["draft"] is None and after["notes"] == "keep me"
     assert backup and backup.read_text(encoding="utf-8") == "old profile\n"
     assert (root / "config" / "field_profile.md").read_text(encoding="utf-8") == PROFILE
     assert 'reader = "a catalysis PhD student"' in (root / "config" / "config.toml").read_text(

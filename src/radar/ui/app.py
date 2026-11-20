@@ -322,6 +322,39 @@ def create_app(
         set_password(user, pw)
         return {"saved": True}
 
+    # ---- connections ----------------------------------------------------------------------
+    @app.get("/api/connections")
+    def connections_summary() -> dict:
+        from ..connections import EXPORT_URL
+
+        store = Store(fresh().db_path)
+        try:
+            return store.connection_summary() | {"export_url": EXPORT_URL}
+        finally:
+            store.close()
+
+    @app.post("/api/connections/import")
+    def import_connections(payload: dict = Body(...)) -> dict:
+        """The export is parsed in memory; only names, profile URLs, and dates are stored."""
+        from ..connections import read_export
+        from ..queue import write_queue
+
+        try:
+            data = base64.b64decode(str(payload.get("data", "")), validate=True)
+            conns, pending = read_export(str(payload.get("filename", "")), data)
+        except binascii.Error:
+            raise HTTPException(400, "file data is not valid base64") from None
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        c = fresh()
+        store = Store(c.db_path)
+        try:
+            res = store.import_connections(conns, pending)
+            write_queue(store, c.queue_dir)
+            return res | store.connection_summary()
+        finally:
+            store.close()
+
     # ---- queue ----------------------------------------------------------------------------
     @app.get("/api/queue")
     def get_queue(all: bool = False) -> list[dict]:

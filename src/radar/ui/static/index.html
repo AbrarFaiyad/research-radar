@@ -235,6 +235,14 @@ textarea.mid { min-height: 380px; }
     <ul class="checks" id="setup-checks"><li class="muted">Checking…</li></ul>
   </div>
 
+  <div class="card" style="margin-top:16px" id="conn-card">
+    <h2>Your connections</h2>
+    <p class="muted" style="margin-top:0">So the queue never suggests people you already know. On LinkedIn, open <a id="c-export" href="https://www.linkedin.com/mypreferences/d/download-my-data" target="_blank" rel="noopener">Get a copy of your data</a>, pick <b>Connections</b> and <b>Invitations</b>, and request the archive. LinkedIn emails a download link within minutes. Drop the ZIP (or Connections.csv) here. Only names, profile links, and dates are kept; emails in the file are ignored. After that, every Send and "Already connected" in the queue keeps the list current.</p>
+    <div class="drop" id="c-drop"><b>Drop the LinkedIn archive here</b> or click to choose it<div class="muted" style="font-size:13px">ZIP, Connections.csv, or Invitations.csv · 25 MB max</div></div>
+    <input type="file" id="c-file" accept=".zip,.csv" hidden>
+    <div id="c-info" class="note"></div>
+  </div>
+
   <div class="card" style="margin-top:16px" id="email-card">
     <h2>Daily email</h2>
     <p class="muted" style="margin-top:0">The digest, podcast, and connection list arrive from your own Gmail. Gmail needs an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">App Password</a> (2-Step Verification must be on). It is stored in Windows Credential Manager, never in a file.</p>
@@ -277,7 +285,7 @@ textarea.mid { min-height: 380px; }
   <div class="row" style="margin-bottom:12px">
     <label class="row"><input type="checkbox" id="q-all"> Show sent and skipped</label>
     <a class="btn" id="q-csv" href="/api/queue.csv" download style="text-decoration:none">Download CSV</a>
-    <span class="muted">Send opens the profile in your browser. Click Connect there, then confirm here.</span>
+    <span class="muted">Send opens the profile in your browser. Click Connect there, then confirm here. People you are connected to never appear; import your connections on the Setup tab.</span>
   </div>
   <table><thead><tr><th>#</th><th>Name</th><th>Degree</th><th>Why</th><th>Topics</th><th>Status</th><th></th></tr></thead>
   <tbody id="q-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody></table>
@@ -469,8 +477,10 @@ async function loadQueue() {
   $$("[data-send]").forEach(b => b.onclick = () => {
     const url = b.dataset.send, cell = b.parentElement;
     window.open(url, "_blank", "noopener");
-    cell.innerHTML = `<span class="muted">Sent it?</span><button class="btn primary" data-yes>Yes, sent</button><button class="btn" data-no>Not yet</button>`;
+    cell.innerHTML = `<span class="muted">Sent it?</span><button class="btn primary" data-yes>Yes, sent</button>
+      <button class="btn" data-conn>Already connected</button><button class="btn" data-no>Not yet</button>`;
     cell.querySelector("[data-yes]").onclick = () => mark(url, "sent").catch(e => toast(e.message));
+    cell.querySelector("[data-conn]").onclick = () => mark(url, "connected").catch(e => toast(e.message));
     cell.querySelector("[data-no]").onclick = loadQueue;
   });
 }
@@ -523,7 +533,7 @@ async function loadSetup() {
   if (s.applied_at) { $("#w-done").hidden = false; $("#w-done").innerHTML = `<b class="ok">Profile applied ${esc(fmtTime(s.applied_at))}.</b> Edit it any time in the Field profile tab, or start over to rebuild it from a new CV.`; }
   else $("#w-done").hidden = true;
   showStep(wStep);
-  loadChecks(); loadEmail();
+  loadChecks(); loadEmail(); loadConnections();
 }
 // With a refined profile, steps 2 and 4 edit the same text; keep the two editors identical.
 [["#w-reader", "#w-reader2"], ["#w-profile", "#w-profile2"]].forEach(([a, b]) => {
@@ -591,6 +601,28 @@ $("#w-reset").onclick = async () => { if (!confirm("Clear the wizard (uploaded C
   await api("/api/onboarding/reset", {}); $("#wlog").textContent = ""; $("#wlog").hidden = true; loadSetup(); };
 jobDone.push(j => { if (j.action.startsWith("onboard") || j.action.startsWith("setup")) loadSetup();
   if (j.action.startsWith("onboard") && j.returncode !== 0) toast("That step failed; see the log below"); });
+
+async function loadConnections() {
+  const s = await api("/api/connections");
+  $("#c-export").href = s.export_url;
+  $("#c-info").innerHTML = s.last_import
+    ? `<b>${s.connected.toLocaleString()} connections</b> and <b>${s.pending.toLocaleString()} pending invitations</b> on record · last import ${esc(fmtTime(s.last_import))}. Re-import any time to catch up.`
+    : `No export imported yet. ${s.connected ? `${s.connected} connections are known from your feed and queue so far.` : ""}`;
+}
+async function uploadExport(file) {
+  if (!file) return;
+  if (file.size > 25 * 1024 * 1024) return toast("File is larger than 25 MB; request only Connections and Invitations");
+  const data = await new Promise((ok, bad) => { const r = new FileReader();
+    r.onload = () => ok(String(r.result).split(",")[1] || ""); r.onerror = bad; r.readAsDataURL(file); });
+  try { const r = await api("/api/connections/import", {filename: file.name, data});
+    toast(`Imported ${r.connections} connections; ${r.removed_from_queue} people left the queue`); loadConnections(); loadStatus(); }
+  catch (e) { toast(e.message); }
+}
+$("#c-drop").onclick = () => $("#c-file").click();
+$("#c-file").onchange = e => uploadExport(e.target.files[0]);
+$("#c-drop").ondragover = e => { e.preventDefault(); $("#c-drop").classList.add("over"); };
+$("#c-drop").ondragleave = () => $("#c-drop").classList.remove("over");
+$("#c-drop").ondrop = e => { e.preventDefault(); $("#c-drop").classList.remove("over"); uploadExport(e.dataTransfer.files[0]); };
 
 async function loadEmail() {
   const d = await api("/api/settings");
