@@ -1,4 +1,4 @@
-"""Read and change the Windows scheduled task that runs `radar daily`."""
+"""Read and change the Windows scheduled tasks (`radar daily`; `radar build` in separate mode)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 
 TASK = "ResearchRadarDaily"
+BUILD_TASK = "ResearchRadarBuild"
+COMMANDS = {TASK: "daily", BUILD_TASK: "build"}  # task name -> the radar command it runs
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
@@ -22,11 +24,13 @@ def _ps(script: str, timeout: int = 60) -> subprocess.CompletedProcess:
     )
 
 
-def get() -> dict:
+def get(task: str = TASK) -> dict:
+    if task not in COMMANDS:
+        raise ValueError(f"unknown task {task!r}")
     if os.name != "nt":
         return {"supported": False}
     script = (
-        f"$t = Get-ScheduledTask -TaskName '{TASK}' -ErrorAction SilentlyContinue; "
+        f"$t = Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue; "
         "if ($t) { $i = $t | Get-ScheduledTaskInfo; "
         "[pscustomobject]@{ exists=$true; enabled=($t.State -ne 'Disabled'); state=[string]$t.State; "
         "time=([datetime]$t.Triggers[0].StartBoundary).ToString('HH:mm'); "
@@ -44,7 +48,11 @@ def get() -> dict:
     return data
 
 
-def set_schedule(root: Path, time: str | None = None, enabled: bool | None = None) -> dict:
+def set_schedule(
+    root: Path, time: str | None = None, enabled: bool | None = None, task: str = TASK
+) -> dict:
+    if task not in COMMANDS:
+        raise ValueError(f"unknown task {task!r}")
     if os.name != "nt":
         raise RuntimeError("scheduling is supported on Windows only")
     if time is not None:
@@ -61,6 +69,10 @@ def set_schedule(root: Path, time: str | None = None, enabled: bool | None = Non
                 str(script),
                 "-Time",
                 time,
+                "-TaskName",
+                task,
+                "-Command",
+                COMMANDS[task],
             ],
             capture_output=True,
             text=True,
@@ -71,7 +83,7 @@ def set_schedule(root: Path, time: str | None = None, enabled: bool | None = Non
             raise RuntimeError(proc.stderr.strip()[:500] or "could not register the task")
     if enabled is not None:
         verb = "Enable" if enabled else "Disable"
-        proc = _ps(f"{verb}-ScheduledTask -TaskName '{TASK}' | Out-Null")
+        proc = _ps(f"{verb}-ScheduledTask -TaskName '{task}' | Out-Null")
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip()[:500] or f"could not {verb.lower()} the task")
-    return get()
+    return get(task)

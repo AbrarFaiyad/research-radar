@@ -31,6 +31,9 @@ ACTIONS: dict[str, list[str]] = {
     "setup-codex": ["setup", "codex"],
     "setup-codex-login": ["setup", "codex-login"],
     "email-test": ["email", "--test"],
+    "build": ["build"],
+    "build-retry": ["build", "--retry"],
+    "build-image": ["build", "--prepare"],
 }
 
 

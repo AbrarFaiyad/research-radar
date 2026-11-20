@@ -24,6 +24,7 @@ class Field:
     choices: tuple[str, ...] = ()
     help: str = ""
     pattern: str = ""  # str kinds: a non-empty value must match this regex
+    message: str = ""  # shown when the pattern does not match (default: "has the wrong format")
 
     @property
     def id(self) -> str:
@@ -82,7 +83,12 @@ SCHEMA: tuple[Field, ...] = (
         help="With the digest, or at its own time.",
     ),
     Field(
-        "builds", "separate_time", "str", "Separate build time (HH:MM)", pattern=r"^\d{2}:\d{2}$"
+        "builds",
+        "separate_time",
+        "str",
+        "Separate build time (HH:MM)",
+        pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+        message="must be a 24-hour time like 08:30",
     ),
     Field(
         "builds",
@@ -90,6 +96,7 @@ SCHEMA: tuple[Field, ...] = (
         "str",
         "GitHub repo (owner/name)",
         pattern=r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$",
+        message="must look like owner/name",
     ),
     Field("builds", "git_name", "str", "Commit author name"),
     Field("builds", "git_email", "email", "Commit author email"),
@@ -152,7 +159,7 @@ def coerce(f: Field, raw: Any) -> Any:
     if f.kind == "email" and text and not _EMAIL.match(text):
         raise ValueError("is not an email address")
     if f.pattern and text and not re.match(f.pattern, text):
-        raise ValueError("has the wrong format")
+        raise ValueError(f.message or "has the wrong format")
     if len(text) > 500:
         raise ValueError("is too long")
     return text
