@@ -35,6 +35,8 @@ jobs:
           node-version: "22"
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.329
+      - name: Drop passwordless sudo
+        run: sudo rm -f /etc/sudoers.d/runner
       - name: Validate folder name
         env:
           FOLDER: ${{ inputs.folder }}
@@ -44,21 +46,28 @@ jobs:
             exit 1
           fi
       - name: Write prompt
-        env:
-          PROMPT: ${{ inputs.prompt }}
-        run: printf '%s' "$PROMPT" > prompt.txt
+        run: |
+          python3 -c 'import json,os,sys;sys.stdout.write(json.load(open(os.environ["GITHUB_EVENT_PATH"]))["inputs"]["prompt"])' > /tmp/prompt.txt
       - name: Build with Claude
+        timeout-minutes: 35
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HOME: /tmp/build-home
         run: |
-          mkdir work
-          cd work
-          claude -p --model sonnet --max-turns 60 --permission-mode bypassPermissions < ../prompt.txt
+          mkdir -p /tmp/build-home /tmp/out/work
+          cd /tmp/out/work
+          rc=0
+          claude -p --model sonnet --max-turns 60 --permission-mode bypassPermissions < /tmp/prompt.txt > /tmp/claude.log 2>&1 || rc=$?
+          echo "claude exit code: $rc"
+          exit "$rc"
       - name: Run the notebook
+        timeout-minutes: 20
+        env:
+          HOME: /tmp/build-home
         run: |
-          mkdir -p work
-          cd work
+          mkdir -p /tmp/build-home /tmp/out/work
+          cd /tmp/out/work
           ran=false
           if [ -f requirements.txt ] && [ -f demo.ipynb ]; then
             if pip install papermill ipykernel && pip install -r requirements.txt \
@@ -66,27 +75,60 @@ jobs:
               ran=true
             fi
           fi
-          printf '{"ran": %s}\n' "$ran" > .status.json
+          printf '{"ran": %s}\n' "$ran" > /tmp/out/status.json
       - name: Remove caches
         if: always()
         run: |
-          mkdir -p work
-          find work \( -name __pycache__ -o -name .ipynb_checkpoints -o -name .venv -o -name .git \) \
+          mkdir -p /tmp/out/work
+          find /tmp/out/work \( -name __pycache__ -o -name .ipynb_checkpoints -o -name .venv -o -name .git \) \
             -prune -exec rm -rf {} +
+      - name: Tripwire for the API key
+        if: always()
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p /tmp/out/work
+          python3 - <<'PY'
+          import base64, json, os, shutil
+          key = os.environ.get("ANTHROPIC_API_KEY", "").strip().encode()
+          out = "/tmp/out"
+          forms = set()
+          if len(key) >= 8:
+              forms |= {key, key.hex().encode(), key.hex().upper().encode()}
+              for off, skip in ((0, 0), (1, 2), (2, 3)):
+                  padded = b"\x00" * off + key
+                  for enc in (base64.b64encode(padded), base64.urlsafe_b64encode(padded)):
+                      forms.add(enc[skip:-2])
+          hit = False
+          for root, _dirs, files in os.walk(out):
+              for name in files:
+                  with open(os.path.join(root, name), "rb") as fh:
+                      data = fh.read()
+                  squashed = b"".join(data.split())
+                  if any(f in data or f in squashed for f in forms):
+                      hit = True
+          if hit:
+              shutil.rmtree(os.path.join(out, "work"), ignore_errors=True)
+              os.makedirs(os.path.join(out, "work"))
+              with open(os.path.join(out, "status.json"), "w") as fh:
+                  json.dump({"ran": False, "blocked": True}, fh)
+          print("tripwire:", "hit" if hit else "clean")
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: build
-          path: work
-          include-hidden-files: true
-          retention-days: 3
+          path: /tmp/out
+          retention-days: 1
 
   publish:
     needs: build
     if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4.9.1
@@ -95,10 +137,19 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: build
-          path: artifact
+          path: ${{ runner.temp }}/artifact
       - name: Scan and commit
         env:
           FOLDER: ${{ inputs.folder }}
-        run: python tools/publish_build.py --folder "$FOLDER" --src artifact
+        run: python tools/publish_build.py --folder "$FOLDER" --src "$RUNNER_TEMP/artifact"
       - name: Push
         run: git push
+      - name: Delete the artifact
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id')
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done

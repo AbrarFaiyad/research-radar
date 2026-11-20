@@ -4,7 +4,7 @@ Runs in the trusted publish job. Everything in the artifact is hostile: it is
 walked with lstat, size-capped, parsed as data only (never imported or run),
 sanitized, scanned with the vendored tools/scan.py, then copied and committed.
 
-Exit codes: 0 published, 2 blocked by the scan or a hostile artifact, 1 error.
+The artifact root holds status.json and work/. Exit codes: 0 published, 2 blocked by the scan or a hostile artifact, 1 error.
 Output carries fixed reasons and relative paths only, never matched text.
 """
 
@@ -117,16 +117,17 @@ def walk_artifact(src: Path) -> list[tuple[str, Path]]:
     return out
 
 
-def read_ran(src: Path) -> bool:
-    """True only when .status.json says ran=true (missing or odd means did not run)."""
-    p = src / ".status.json"
+def read_status(src: Path) -> tuple[bool, bool]:
+    """Return (ran, blocked) from status.json; missing or odd means did not run."""
+    p = src / "status.json"
     try:
         st = os.lstat(p)
         if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
-            return False
-        return json.loads(p.read_text(encoding="utf-8")).get("ran") is True
+            return False, False
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data.get("ran") is True, data.get("blocked") is True
     except (OSError, ValueError, AttributeError):
-        return False
+        return False, False
 
 
 def _png_b64(value: object, rel: str) -> str:
@@ -183,7 +184,10 @@ def process_notebook(raw: bytes, rel: str, ran: bool) -> tuple[bytes, bytes]:
             if isinstance(b, dict):
                 _clean_mime_bundle(b, rel, pngs)
     if not ran:
-        cells.insert(0, {"cell_type": "markdown", "metadata": {}, "source": [f"**{BANNER}**"]})
+        banner = {"cell_type": "markdown", "metadata": {}, "source": [f"**{BANNER}**"]}
+        if isinstance(nb.get("nbformat_minor"), int) and nb["nbformat_minor"] >= 5:
+            banner["id"] = "build-banner"
+        cells.insert(0, banner)
     dump = {"indent": 1, "ensure_ascii": False}
     real = (json.dumps(nb, **dump) + "\n").encode("utf-8")
     for data, mime in pngs:
@@ -237,13 +241,15 @@ def update_index(repo: Path, folder: str, ran: bool) -> None:
     path.write_text("".join(lines), encoding="utf-8", newline="\n")
 
 
+GIT_ENV_KEEP = ("PATH", "HOME", "LANG", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP")
+
+
 def _git_env() -> dict[str, str]:
     stamp = f"@{int(time.time())} +0000"
-    env = dict(os.environ)
-    for k in [k for k in env if k.startswith("GIT_")]:
-        del env[k]
+    env = {k: os.environ[k] for k in GIT_ENV_KEEP if k in os.environ}
     env.update(
         TZ="UTC",
+        GIT_CONFIG_NOSYSTEM="1",
         GIT_AUTHOR_NAME=BOT_NAME,
         GIT_AUTHOR_EMAIL=BOT_EMAIL,
         GIT_COMMITTER_NAME=BOT_NAME,
@@ -262,6 +268,8 @@ def commit(repo: Path, folder: str) -> None:
         f"user.email={BOT_EMAIL}",
         "-c",
         "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
     ]
     env = _git_env()
 
@@ -275,10 +283,12 @@ def commit(repo: Path, folder: str) -> None:
 def publish(folder: str, src: Path, repo: Path) -> None:
     if not FOLDER_RE.fullmatch(folder):
         raise Blocked("bad folder name")
-    files = walk_artifact(src)
+    ran, blocked = read_status(src)
+    if blocked:
+        raise Blocked("build output contained the API key")
+    files = walk_artifact(src / "work")
     if not files:
         raise Blocked("empty artifact")
-    ran = read_ran(src)
     dest = repo / folder
     if os.path.lexists(dest):
         raise FileExistsError

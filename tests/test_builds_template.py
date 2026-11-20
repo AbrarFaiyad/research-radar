@@ -38,6 +38,7 @@ def test_workflow_triggers_and_concurrency():
     wf = _wf()
     on = wf.get("on", wf.get(True))  # YAML 1.1 reads `on` as the boolean True
     inputs = on["workflow_dispatch"]["inputs"]
+    assert set(on) == {"workflow_dispatch"}
     assert set(inputs) == {"folder", "prompt"}
     assert all(i["required"] and i["type"] == "string" for i in inputs.values())
     assert wf["permissions"] == {}
@@ -48,13 +49,16 @@ def test_workflow_triggers_and_concurrency():
 def test_workflow_permissions_and_secret_scope():
     wf = _wf()
     assert wf["jobs"]["build"]["permissions"] == {"contents": "read"}
-    assert wf["jobs"]["publish"]["permissions"] == {"contents": "write"}
+    assert wf["jobs"]["publish"]["permissions"] == {"contents": "write", "actions": "write"}
+    for job in wf["jobs"].values():
+        assert "secrets." not in json.dumps(job.get("env", {}))
     assert wf["jobs"]["publish"]["needs"] == "build"
     assert "secrets." not in json.dumps(wf["jobs"]["publish"])
     assert "secrets." not in json.dumps({k: v for k, v in wf.items() if k != "jobs"})
     holders = [s for s in wf["jobs"]["build"]["steps"] if "secrets." in json.dumps(s)]
-    assert len(holders) == 1
-    assert holders[0]["env"] == {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"}
+    assert [h["name"] for h in holders] == ["Build with Claude", "Tripwire for the API key"]
+    for h in holders:
+        assert h["env"]["ANTHROPIC_API_KEY"] == "${{ secrets.ANTHROPIC_API_KEY }}"
     assert "--permission-mode bypassPermissions" in holders[0]["run"]
 
 
@@ -62,7 +66,10 @@ def test_workflow_inputs_only_through_env():
     for step in _steps(_wf()):
         assert "${{" not in step.get("run", ""), step.get("run")
     text = (TEMPLATE / "build.yml").read_text(encoding="utf-8")
-    assert "${{ inputs.folder }}" in text and "${{ inputs.prompt }}" in text
+    assert "${{ inputs.folder }}" in text
+    assert "inputs.prompt" not in text  # the prompt is read from the event file
+    for step in _steps(_wf()):
+        assert "inputs.prompt" not in json.dumps(step.get("env", {}))
     assert "github.event" not in text
 
 
@@ -73,6 +80,89 @@ def test_workflow_actions_pinned_to_sha():
     for u in uses:
         assert SHA_RE.match(u), u
         assert re.search(re.escape(u) + r"\s+#\s*v\d", text), u
+
+
+def _build_steps():
+    return _wf()["jobs"]["build"]["steps"]
+
+
+def _index(name):
+    return next(i for i, s in enumerate(_build_steps()) if s.get("name") == name)
+
+
+def test_artifact_is_short_lived_and_visible_files_only():
+    text = (TEMPLATE / "build.yml").read_text(encoding="utf-8")
+    assert "include-hidden-files" not in text
+    steps = _build_steps()
+    up = next(s for s in steps if "upload-artifact" in s.get("uses", ""))
+    assert up["with"]["retention-days"] == 1 and up["with"]["path"] == "/tmp/out"
+    assert steps.index(up) > _index("Tripwire for the API key")
+    assert steps[_index("Tripwire for the API key")]["if"] == "always()"
+
+
+def test_publish_deletes_artifact_and_reads_it_from_runner_temp():
+    steps = _wf()["jobs"]["publish"]["steps"]
+    delete = next(s for s in steps if s.get("name") == "Delete the artifact")
+    assert delete["if"] == "always()" and "-X DELETE" in delete["run"]
+    assert delete["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    tool = max(i for i, s in enumerate(steps) if "publish_build" in s.get("run", ""))
+    assert steps.index(delete) > tool
+    dl = next(s for s in steps if "download-artifact" in s.get("uses", ""))
+    assert dl["with"]["path"] == "${{ runner.temp }}/artifact"
+    assert '--src "$RUNNER_TEMP/artifact"' in "".join(s.get("run", "") for s in steps)
+    assert _wf()["jobs"]["publish"]["timeout-minutes"] == 10
+
+
+def test_untrusted_code_runs_outside_home_runner_without_sudo():
+    steps = _build_steps()
+    text = (TEMPLATE / "build.yml").read_text(encoding="utf-8")
+    assert "/home" not in text
+    for name, minutes in (("Build with Claude", 35), ("Run the notebook", 20)):
+        step = steps[_index(name)]
+        assert step["env"]["HOME"] == "/tmp/build-home"
+        assert step["timeout-minutes"] == minutes
+        assert "cd /tmp/out/work" in step["run"]
+    sudo = next(
+        i for i, s in enumerate(steps) if "sudo rm -f /etc/sudoers.d/runner" in s.get("run", "")
+    )
+    assert sudo < _index("Build with Claude") < _index("Run the notebook")
+    assert "> /tmp/claude.log" in steps[_index("Build with Claude")]["run"]
+
+
+def _tripwire(tmp_path, key, content):
+    run = _build_steps()[_index("Tripwire for the API key")]["run"]
+    code = run.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]  # YAML already dedented it
+    code = code.replace("/tmp/out", str(tmp_path / "out").replace("\\", "/"))
+    (tmp_path / "out" / "work").mkdir(parents=True)
+    (tmp_path / "out" / "status.json").write_text('{"ran": true}')
+    (tmp_path / "out" / "work" / "demo.ipynb").write_bytes(content)
+    env = {**os.environ, "ANTHROPIC_API_KEY": key}
+    subprocess.run([sys.executable, "-I", "-c", code], env=env, check=True, capture_output=True)
+    return json.loads((tmp_path / "out" / "status.json").read_text()), tmp_path / "out" / "work"
+
+
+@pytest.mark.parametrize("form", ["raw", "hex", "b64-0", "b64-1", "b64-2", "wrapped"])
+def test_tripwire_catches_key_forms(tmp_path, form):
+    key = "sk-ant-api03-Zq9" + "k3Lm2" * 6
+    kb = key.encode()
+    b64 = base64.b64encode(kb)
+    blob = {
+        "raw": kb,
+        "hex": kb.hex().encode(),
+        "b64-0": b64,
+        "b64-1": base64.b64encode(b"a" + kb),
+        "b64-2": base64.b64encode(b"ab" + kb),
+        "wrapped": b"\n".join(b64[i : i + 12] for i in range(0, len(b64), 12)),
+    }[form]
+    status, work = _tripwire(tmp_path, key, b"xx " + blob + b" yy")
+    assert status == {"ran": False, "blocked": True}
+    assert list(work.iterdir()) == []
+
+
+def test_tripwire_leaves_clean_output(tmp_path):
+    status, work = _tripwire(tmp_path, "sk-ant-api03-secretsecretsecret", b"hello")
+    assert status == {"ran": True}
+    assert (work / "demo.ipynb").exists()
 
 
 def test_build_job_does_not_check_out_the_repo():
@@ -137,6 +227,8 @@ def display(data):
 class Env:
     def __init__(self, repo, art, mod):
         self.repo, self.art, self.mod = repo, art, mod
+        self.work = art / "work"
+        self.work.mkdir()
 
     def run(self, folder=FOLDER):
         return self.mod.main(["--folder", folder, "--src", str(self.art), "--repo", str(self.repo)])
@@ -144,8 +236,8 @@ class Env:
     def commits(self):
         return int(_git(self.repo, "rev-list", "--count", "HEAD"))
 
-    def status(self, ran=True):
-        (self.art / ".status.json").write_text(json.dumps({"ran": ran}))
+    def status(self, ran=True, **extra):
+        (self.art / "status.json").write_text(json.dumps({"ran": ran, **extra}))
 
 
 @pytest.fixture
@@ -177,7 +269,7 @@ def env(tmp_path, monkeypatch):
 
 
 def write_nb(e, cells, name="demo.ipynb"):
-    (e.art / name).write_text(json.dumps(nb(cells)), encoding="utf-8")
+    (e.work / name).write_text(json.dumps(nb(cells)), encoding="utf-8")
 
 
 def published_nb(e):
@@ -187,8 +279,8 @@ def published_nb(e):
 def test_publish_commits_as_bot_in_utc(env):
     env.status()
     write_nb(env, [md("# Hello"), code()])
-    (env.art / "requirements.txt").write_text("numpy\n")
-    (env.art / ".hidden").write_text("x")
+    (env.work / "requirements.txt").write_text("numpy\n")
+    (env.work / ".hidden").write_text("x")
     assert env.run() == 0
     assert env.commits() == 2
     out = _git(env.repo, "log", "-1", "--format=%an|%ae|%cn|%ce|%ad|%cd|%s", "--date=iso")
@@ -199,7 +291,7 @@ def test_publish_commits_as_bot_in_utc(env):
     result = json.loads((env.repo / FOLDER / "build-result.json").read_text())
     assert result == {"status": "published", "folder": FOLDER}
     assert not (env.repo / FOLDER / ".hidden").exists()
-    assert not (env.repo / FOLDER / ".status.json").exists()
+    assert not (env.repo / FOLDER / "status.json").exists()
     readme = (env.repo / "README.md").read_text(encoding="utf-8")
     assert "| 2026-11-20 | numpy | array-basics | yes |" in readme
     _git(env.repo, "push", "origin", "HEAD:main")
@@ -285,11 +377,43 @@ def test_did_not_run_adds_banner(env):
     assert "| no |" in (env.repo / "README.md").read_text()
 
 
+def test_blocked_status_exits_2(env, capsys):
+    env.status(ran=False, blocked=True)
+    write_nb(env, [md("a")])
+    before = env.commits()
+    assert env.run() == 2
+    assert "build output contained the API key" in capsys.readouterr().out
+    assert env.commits() == before and not (env.repo / FOLDER).exists()
+
+
+def test_banner_gets_id_for_nbformat_5(env):
+    env.status(ran=False)
+    write_nb(env, [md("a")])
+    assert env.run() == 0
+    assert published_nb(env)["cells"][0]["id"] == "build-banner"
+
+
+def test_git_uses_allowlisted_env_and_no_hooks(env, monkeypatch):
+    monkeypatch.setenv("GIT_TRACE", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    e = env.mod._git_env()
+    assert "ANTHROPIC_API_KEY" not in e and "GIT_TRACE" not in e
+    assert e["GIT_CONFIG_NOSYSTEM"] == "1" and e["TZ"] == "UTC"
+    hooks = env.repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "post-commit").write_text('#!/bin/sh\ntouch "$PWD/hook-ran"\n')
+    (hooks / "post-commit").chmod(0o755)
+    env.status()
+    write_nb(env, [md("a")])
+    assert env.run() == 0
+    assert not (env.repo / "hook-ran").exists()
+
+
 def test_png_file_sanitized(env):
     env.status()
     write_nb(env, [md("a")])
     dirty = make_png(_chunk(b"tEXt", b"Comment\x00hello"))
-    (env.art / "plot.png").write_bytes(dirty)
+    (env.work / "plot.png").write_bytes(dirty)
     assert env.run() == 0
     assert (env.repo / FOLDER / "plot.png").read_bytes() == scan.sanitize_png(dirty)
 
@@ -312,7 +436,7 @@ def test_symlink_in_artifact_blocks(env):
         if sys.platform != "win32":
             pytest.skip("symlinks not permitted")
         subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(env.art / "link"), str(env.art.parent)],
+            ["cmd", "/c", "mklink", "/J", str(env.work / "link"), str(env.art.parent)],
             check=True,
             capture_output=True,
         )
@@ -331,7 +455,7 @@ def test_dotdot_folder_blocks(env):
 def test_oversized_file_blocks(env):
     env.status()
     write_nb(env, [md("a")])
-    (env.art / "big.txt").write_bytes(b"a" * (5 * 1024 * 1024 + 1))
+    (env.work / "big.txt").write_bytes(b"a" * (5 * 1024 * 1024 + 1))
     assert env.run() == 2
     assert not (env.repo / FOLDER).exists()
 
@@ -347,7 +471,7 @@ def test_existing_folder_refused(env):
 
 def test_invalid_notebook_json_blocks(env):
     env.status()
-    (env.art / "demo.ipynb").write_text("{not json")
+    (env.work / "demo.ipynb").write_text("{not json")
     assert env.run() == 2
 
 
