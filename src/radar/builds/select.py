@@ -80,7 +80,8 @@ def package_slug(code_url: str, title: str) -> str:
 def folder_name(day: str, package: str, task: str) -> str:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
         raise ValueError(f"day must be YYYY-MM-DD, got {day!r}")
-    return f"{day}_{_slugify(package)}_{_slugify(task)}"
+    # Fallbacks keep the name publishable when a title has no ASCII letters or digits.
+    return f"{day}_{_slugify(package) or 'item'}_{_slugify(task) or 'demo'}"
 
 
 def _eligible(item: dict) -> bool:

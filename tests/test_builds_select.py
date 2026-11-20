@@ -99,3 +99,9 @@ def test_corrupt_history_raises_and_is_untouched(tmp_path):
             call()
     assert path.read_bytes() == b"{not json"
     assert list(tmp_path.iterdir()) == [path]
+
+
+def test_folder_name_falls_back_for_empty_slugs():
+    assert folder_name("2026-11-21", "", "") == "2026-11-21_item_demo"
+    assert folder_name("2026-11-21", "\u6f22\u5b57", "\u00e9\u00e8!!") == "2026-11-21_item_demo"
+    assert folder_name("2026-11-21", "mace", "\u6f22") == "2026-11-21_mace_demo"

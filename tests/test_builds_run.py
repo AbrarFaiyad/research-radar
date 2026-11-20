@@ -143,10 +143,44 @@ def digest(tmp_path):
     return d
 
 
+def git(*args, cwd):
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-c", "safe.directory=*", "-c", "core.autocrlf=false", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+PROFILE = "# Field profile\nCOMMITTED-PROFILE-LINE\n"
+
+
 @pytest.fixture
-def on_cfg(cfg):
+def git_root(tmp_path):
+    """A throwaway repo root with a committed field profile and the real build prompt."""
+    import shutil
+
+    from radar.config import REPO_ROOT
+
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    (root / "prompts").mkdir()
+    shutil.copy(REPO_ROOT / "prompts" / "build_task.md", root / "prompts" / "build_task.md")
+    (root / "config" / "field_profile.md").write_bytes(PROFILE.encode("utf-8"))
+    git("init", "-q", "-b", "main", cwd=root)
+    git("add", "config/field_profile.md", cwd=root)
+    git("-c", "user.name=t", "-c", "user.email=t@x.y", "commit", "-q", "-m", "p", cwd=root)
+    return root
+
+
+@pytest.fixture
+def on_cfg(cfg, git_root):
     cfg.builds.enabled = True
     cfg.builds.repo = "owner/daily"
+    cfg.root = git_root
     return cfg
 
 
@@ -542,3 +576,106 @@ def test_docker_timeout_checking_container_fails_cleanly(on_cfg, digest, result)
     assert pub.calls == []
     assert not (on_cfg.builds_dir / "work" / rec.folder).exists()
     assert not _tree_has(on_cfg.builds_dir, KEY.encode())
+
+
+def test_committed_profile_reaches_prompt_even_with_crlf_checkout(on_cfg, digest, result):
+    profile = on_cfg.root / "config" / "field_profile.md"
+    profile.write_bytes(PROFILE.replace("\n", "\r\n").encode("utf-8"))
+    seen = {}
+    rec = go(on_cfg, digest, result, docker=fake_docker(seen=seen))
+    assert rec.status == "published"
+    assert "COMMITTED-PROFILE-LINE" in seen["blob"]
+
+
+def test_uncommitted_profile_skips_build(on_cfg, digest, result):
+    profile = on_cfg.root / "config" / "field_profile.md"
+    profile.write_text(PROFILE + "From the CV: PRIVATE-CV-TEXT\n", encoding="utf-8")
+    seen = {}
+    rec = go(on_cfg, digest, result, docker=fake_docker(seen=seen))
+    assert (rec.status, rec.reason) == ("skipped", "field profile has uncommitted changes")
+    assert "blob" not in seen
+
+
+def test_profile_not_committed_skips_build(on_cfg, digest, result, tmp_path):
+    bare = tmp_path / "not-a-repo"
+    (bare / "config").mkdir(parents=True)
+    (bare / "config" / "field_profile.md").write_text(PROFILE, encoding="utf-8")
+    on_cfg.root = bare
+    rec = go(on_cfg, digest, result)
+    assert (rec.status, rec.reason) == ("skipped", "field profile not committed")
+    on_cfg.root = tmp_path / "repo"
+    git("rm", "-q", "--cached", "config/field_profile.md", cwd=on_cfg.root)
+    git("-c", "user.name=t", "-c", "user.email=t@x.y", "commit", "-q", "-m", "x", cwd=on_cfg.root)
+    rec = go(on_cfg, digest, result)
+    assert (rec.status, rec.reason) == ("skipped", "field profile not committed")
+
+
+def test_tool_leftovers_are_removed_before_the_scan(on_cfg, digest, result):
+    def messy(work):
+        good_build(work)
+        for rel in (
+            ".venv/lib/x.so",
+            "venv/bin/python",
+            "clone/.git/objects/ab",
+            "node_modules/pkg/index.js",
+            ".mypy_cache/x",
+            ".ruff_cache/x",
+            "nb/.ipynb_checkpoints/x",
+            "sub/.pytest_cache/x",
+            "sub/deep/__pycache__/x.pyc",
+        ):
+            (work / rel).parent.mkdir(parents=True, exist_ok=True)
+            (work / rel).write_bytes(b"\x00\x01binary")
+
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_build=messy), publisher=pub)
+    assert rec.status == "published"
+    names = {p.name for p in pub.calls[0][0].rglob("*")}
+    for gone in (".venv", "venv", ".git", "node_modules", ".mypy_cache", ".ruff_cache"):
+        assert gone not in names
+    assert not names & {".ipynb_checkpoints", ".pytest_cache", "__pycache__"}
+    assert "clone" in names and "sub" in names
+
+
+def test_prompt_sends_venvs_and_clones_to_tmp():
+    from radar.config import REPO_ROOT
+
+    text = (REPO_ROOT / "prompts" / "build_task.md").read_text(encoding="utf-8")
+    assert "virtual environments" in text and "/tmp" in text
+
+
+def test_os_error_after_container_exit_fails_and_deletes_folder(
+    on_cfg, digest, result, monkeypatch
+):
+    def broken(*a, **k):
+        raise OSError("disk gone")
+
+    for target in ("_move_logs", "_clean_work", "_sanitize_images"):
+        monkeypatch.undo()
+        monkeypatch.setattr(run_mod, target, broken)
+        (on_cfg.builds_dir / "history.json").unlink(missing_ok=True)
+        pub = FakePublisher()
+        rec = go(on_cfg, digest, result, publisher=pub)
+        assert (rec.status, rec.reason) == ("failed", "could not check the build folder"), target
+        assert pub.calls == [] and not (on_cfg.builds_dir / "work" / rec.folder).exists()
+        assert json.loads((digest / "build.json").read_text("utf-8"))["status"] == "failed"
+
+
+def test_os_error_writing_banner_fails(on_cfg, digest, result, monkeypatch):
+    real = run_mod.Path.write_text
+
+    def flaky(self, text, *a, **k):
+        if self.name == "README.md" and text.startswith("> **DID NOT RUN.**"):
+            raise OSError("read-only")
+        return real(self, text, *a, **k)
+
+    monkeypatch.setattr(run_mod.Path, "write_text", flaky)
+    rec = go(on_cfg, digest, result, docker=fake_docker(verify=(False, False)))
+    assert (rec.status, rec.reason) == ("failed", "could not check the build folder")
+
+
+def test_missing_files_record_claude_exit_code(on_cfg, digest, result):
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_build=lambda w: None, codes=(3, 0)))
+    assert (rec.status, rec.reason) == ("failed", "claude exited 3; no README.md or no Python file")
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_build=lambda w: None))
+    assert (rec.status, rec.reason) == ("failed", "no README.md or no Python file")

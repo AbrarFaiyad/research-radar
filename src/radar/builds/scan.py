@@ -38,6 +38,7 @@ PNG_SIZES = {b"IHDR": 13, b"IEND": 0, b"gAMA": 4, b"cHRM": 32, b"sRGB": 1, b"pHY
 PNG_BUDGET = 64 * MB  # total inflate allowance per file
 PNG_MARKER_LEN = 8  # shorter markers would match chunk bytes by chance
 MIN_MARKER_LEN = 3
+MAX_FILES = 2000  # a learning kit has a handful of files; thousands means a venv or a clone
 WINDOW = 16
 
 SECRET_RE = re.compile(
@@ -384,10 +385,12 @@ def scan_tree(
     max_file_mb: float,
     max_folder_mb: float,
     secrets: Sequence[str] = (),
+    max_files: int = MAX_FILES,
 ) -> list[Finding]:
     root = Path(root)
     findings: list[Finding] = []
     total = 0
+    files = 0
     marks = [m for m in markers if len(m) >= MIN_MARKER_LEN]
     try:
         rst = os.lstat(root)
@@ -429,6 +432,10 @@ def scan_tree(
             elif st.st_nlink > 1:
                 findings.append(Finding(rel, "hard link"))
             else:
+                files += 1
+                if files > max_files:
+                    findings.append(Finding(".", "too many files"))
+                    return findings
                 total += st.st_size
                 if st.st_size > max_file_mb * MB:
                     findings.append(Finding(rel, "file too large"))

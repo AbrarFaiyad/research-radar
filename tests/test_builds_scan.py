@@ -448,3 +448,12 @@ def test_known_secret_clean_and_tree(root):
     assert scan.scan_bytes("a.txt", b"nothing here", [], secrets=[REAL]) == []
     (root / "x.txt").write_text(REAL.encode().hex(), encoding="utf-8")
     assert scan.scan_tree(root, [], 5, 20, secrets=[REAL])
+
+
+def test_too_many_files(tmp_path):
+    for i in range(6):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+    assert scan.scan_tree(tmp_path, [], 5, 20, max_files=6) == []
+    found = scan.scan_tree(tmp_path, [], 5, 20, max_files=5)
+    assert [(f.path, f.reason) for f in found] == [(".", "too many files")]
+    assert scan.MAX_FILES == 2000

@@ -339,7 +339,7 @@ The build takes the highest-ranked digest item that has a code link, an OSI-appr
 
 No personal information may leave your computer through a build. The rules are:
 
-- Nothing personal enters the sandbox. Claude receives only the selected item's public fields, the field profile that is already public in this repository, and the build instructions. The database, queue, connections, CV, settings, email details, and browser profiles stay out.
+- Nothing personal enters the sandbox. Claude receives only the selected item's public fields, the field profile as last committed to this repository, and the build instructions. The wizard and the Field profile tab change the working copy, so a build skips while `config/field_profile.md` has uncommitted changes. The database, queue, connections, CV, settings, email details, and browser profiles stay out.
 - The sandbox starts with an empty environment. It has no host environment variables, git settings, SSH keys, or GitHub token. The only host folder it can write to is an empty output folder for that build.
 - The sandbox reaches only an allowlist of sites, such as PyPI, GitHub, Hugging Face, and the Anthropic API. Traffic goes through a proxy, and everything else is refused, including your local network. A malicious package therefore cannot reach other servers or your local network. Allowlisted sites can still receive uploads, so the API key could leave through them. Keep the key's spend limit low.
 - A second, fresh container installs the requirements and runs the smoke test. Your computer never runs code from a build.

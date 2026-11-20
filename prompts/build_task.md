@@ -49,4 +49,4 @@ README.md sections, in this order:
 - Never write absolute paths, user names, host names, or anything about the machine you run on into any file. Use relative paths only.
 - Never copy credentials, API keys, or environment variables into any file or output.
 - Keep a short BUILD_LOG.md: what you tried, what failed, how it was fixed.
-- Write the files directly into /work. Do not leave extra folders or caches behind.
+- Write the files directly into /work. Put virtual environments, cloned repositories, and caches under /tmp, never in /work. Do not leave extra folders or caches behind.

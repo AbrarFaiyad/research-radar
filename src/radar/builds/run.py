@@ -31,7 +31,26 @@ BANNER = (
 DID_NOT_RUN = "requirements did not install or the demo test did not pass"
 LINK_REASON = "link or special file in the build folder"
 DONE = ("published", "did_not_run")
-CLEAN_NAMES = (".task", "__pycache__", ".pytest_cache")
+# Tool leftovers removed anywhere in the build folder before it is checked.
+CLEAN_NAMES = frozenset(
+    {
+        ".venv",
+        "venv",
+        ".git",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".ipynb_checkpoints",
+        ".pytest_cache",
+        "__pycache__",
+    }
+)
+PROFILE_REL = "config/field_profile.md"
+GIT_ENV_ALLOW = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+GIT_TIMEOUT_S = 30
+NOT_COMMITTED = "field profile not committed"
+UNCOMMITTED = "field profile has uncommitted changes"
+CHECK_FAILED = "could not check the build folder"
 TEMPLATE_RE = re.compile(r"\{\{(DAY|FIELD_PROFILE|ITEM_JSON)\}\}")
 
 
@@ -54,6 +73,30 @@ def render_prompt(template: str, day: str, item: dict, profile: str) -> str:
         "ITEM_JSON": json.dumps(item, indent=2, ensure_ascii=False),
     }
     return TEMPLATE_RE.sub(lambda m: values[m.group(1)], template)
+
+
+def _committed_profile(root: Path) -> tuple[str | None, str]:
+    """The field profile as committed at HEAD, or (None, skip reason).
+
+    The setup wizard and the Field profile tab rewrite the working copy, possibly with
+    CV-derived text, so only the committed version may reach the build.
+    """
+    env = {k: v for k, v in os.environ.items() if k.upper() in GIT_ENV_ALLOW}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    argv = ["git", "-c", f"safe.directory={Path(root).as_posix()}", "show", f"HEAD:{PROFILE_REL}"]
+    try:
+        proc = subprocess.run(  # noqa: S603 - argv list, no shell
+            argv, cwd=root, env=env, capture_output=True, timeout=GIT_TIMEOUT_S, check=False
+        )
+        if proc.returncode != 0:
+            return None, NOT_COMMITTED
+        committed = proc.stdout.decode("utf-8").replace("\r\n", "\n")
+        working = (Path(root) / PROFILE_REL).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        return None, NOT_COMMITTED
+    if committed != working:
+        return None, UNCOMMITTED
+    return committed, ""
 
 
 def _write_record(record: BuildRecord, digest_folder: Path, records_dir: Path) -> None:
@@ -134,11 +177,21 @@ def _container_gone(docker, name: str) -> bool:
 
 
 def _clean_work(work: Path) -> None:
-    for name in CLEAN_NAMES:
-        _remove(work / name)
-    for p in [*work.rglob("__pycache__"), *work.rglob(".pytest_cache")]:
-        _remove(p)
+    """Remove the task folder, the verify result, and tool leftovers anywhere in the tree.
+
+    Runs after the link check, and never follows links.
+    """
+    _remove(work / ".task")
     _remove(work / ".verify.json")
+    stack = [work]
+    while stack:
+        with os.scandir(stack.pop()) as it:
+            entries = list(it)
+        for e in entries:
+            if e.name in CLEAN_NAMES:
+                _remove(Path(e.path))
+            elif e.is_dir(follow_symlinks=False):
+                stack.append(Path(e.path))
 
 
 def _move_logs(work: Path, dest: Path) -> None:
@@ -245,6 +298,9 @@ def run_build(
     ready, why = docker.docker_ready()
     if not ready:
         return finish("skipped", why)
+    profile, why = _committed_profile(cfg.root)
+    if profile is None:
+        return finish("skipped", why)
     history = History(cfg.builds_dir / "history.json")
     try:
         if history.published_on(day):
@@ -258,7 +314,6 @@ def run_build(
     folder = folder_name(day, cand.package, cand.title)
     work = cfg.builds_dir / "work" / folder
     try:
-        profile = (cfg.root / "config" / "field_profile.md").read_text(encoding="utf-8")
         template = (cfg.root / "prompts" / "build_task.md").read_text(encoding="utf-8")
         prompt = render_prompt(template, day, cand.item, profile)
         _remove(work)
@@ -290,13 +345,17 @@ def run_build(
         return finish("failed", "build container did not stop")
     if _has_special_entry(work):
         return finish("blocked", LINK_REASON)
-    _move_logs(work, cfg.builds_dir / "logs" / folder)
-    _redact_logs(cfg.builds_dir / "logs" / folder, api_key)
-    if code == 124:
-        return finish("failed", "build timed out")
-    _clean_work(work)
-    if not _has_deliverables(work):
-        return finish("failed", "no README.md or no Python file")
+    try:
+        _move_logs(work, cfg.builds_dir / "logs" / folder)
+        _redact_logs(cfg.builds_dir / "logs" / folder, api_key)
+        if code == 124:
+            return finish("failed", "build timed out")
+        _clean_work(work)
+        if not _has_deliverables(work):
+            missing = "no README.md or no Python file"
+            return finish("failed", f"claude exited {code}; {missing}" if code else missing)
+    except OSError:
+        return finish("failed", CHECK_FAILED)
 
     verified = False
     try:
@@ -310,15 +369,17 @@ def run_build(
         verified = vcode != 124 and _read_verify(work)
     except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
         verified = False
-    _clean_work(work)
-    if not _has_deliverables(work):
-        return finish("failed", "no README.md or no Python file")
-    if not verified:
-        readme = work / "README.md"
-        text = readme.read_text(encoding="utf-8", errors="replace")
-        readme.write_text(BANNER + text, encoding="utf-8")
-
-    _sanitize_images(work)
+    try:
+        _clean_work(work)
+        if not _has_deliverables(work):
+            return finish("failed", "no README.md or no Python file")
+        if not verified:
+            readme = work / "README.md"
+            text = readme.read_text(encoding="utf-8", errors="replace")
+            readme.write_text(BANNER + text, encoding="utf-8")
+        _sanitize_images(work)
+    except OSError:
+        return finish("failed", CHECK_FAILED)
 
     markers = personal_markers(cfg)
     findings = scan_tree(work, markers, b.max_file_mb, b.max_folder_mb, secrets=[api_key])
