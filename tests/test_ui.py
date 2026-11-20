@@ -413,3 +413,24 @@ def test_build_markdown_drops_remote_images(client):
     d = client.get("/api/builds/2026-11-19").json()
     assert "<img" not in d["readme_html"] and "<img" not in d["log_html"]
     assert "evil.example" not in d["log_html"] and "chart" in d["readme_html"]
+
+
+@pytest.mark.parametrize(
+    ("action", "cleans"),
+    [("build", True), ("build-retry", True), ("daily", True), ("scan", False)],
+)
+def test_cancel_removes_build_containers(tmp_path, monkeypatch, action, cleans):
+    from types import SimpleNamespace
+
+    from radar.builds import sandbox
+    from radar.ui import jobs
+    from radar.ui.jobs import Job
+
+    killed, removed = [], []
+    monkeypatch.setattr(jobs.subprocess, "run", lambda argv, **kw: killed.append(argv))
+    monkeypatch.setattr(sandbox, "remove_build_containers", lambda: removed.append(True))
+    r = JobRunner(tmp_path, tmp_path / "data", python="py")
+    r.current = Job(action, ["radar", action])
+    r.current.proc = SimpleNamespace(pid=4242, terminate=lambda: killed.append("term"))
+    assert r.cancel() is True
+    assert killed and removed == ([True] if cleans else [])

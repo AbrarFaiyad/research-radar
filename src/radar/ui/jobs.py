@@ -36,6 +36,9 @@ ACTIONS: dict[str, list[str]] = {
     "build-image": ["build", "--prepare"],
 }
 
+# Actions that may start a build container; cancelling them also removes it.
+CLEANUP_ACTIONS = frozenset({"build", "build-retry", "daily"})
+
 
 class JobBusy(RuntimeError):
     pass
@@ -145,4 +148,9 @@ class JobRunner:
             )
         else:
             job.proc.terminate()
+        if job.action in CLEANUP_ACTIONS:
+            # Killing the radar process leaves a running build container behind.
+            from ..builds import sandbox
+
+            sandbox.remove_build_containers()
         return True

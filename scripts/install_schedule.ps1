@@ -21,7 +21,7 @@ $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 # Runs only when you are logged in (the scan uses a visible browser window), and catches up
 # if the machine was asleep at the scheduled time.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `

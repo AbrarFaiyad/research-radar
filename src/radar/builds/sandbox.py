@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -24,6 +25,9 @@ PROXY_IMAGE = "radar-builds-proxy:1"
 PROXY_URL = f"http://{PROXY}:8888"
 DOCKER_DIR = REPO_ROOT / "docker"
 ENTRY = "/usr/local/bin/entry.sh"
+BUILD_PREFIX = "radar-build-"
+KEY_FILE_PREFIX = "radar-key-"
+STALE_KEY_FILE_S = 2 * 3600
 _HOST_RE = re.compile(r"[a-z0-9.-]+")
 
 VERIFY_SCRIPT = (
@@ -62,7 +66,16 @@ def _env() -> dict[str, str]:
 
 
 def _run(run, argv: list[str], timeout: float | None = None):
-    return run(argv, env=_env(), capture_output=True, text=True, timeout=timeout)
+    # Docker and pip write UTF-8 (progress bars included); the Windows locale codec would fail.
+    return run(
+        argv,
+        env=_env(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def _check(proc, what: str) -> None:
@@ -101,14 +114,19 @@ def render_proxy_conf() -> str:
 
 
 def ensure_network_and_proxy(cfg, run=subprocess.run) -> None:
-    if _run(run, ["docker", "network", "inspect", NETWORK]).returncode != 0:
+    inspect = _run(run, ["docker", "network", "inspect", "-f", "{{.Internal}}", NETWORK])
+    if inspect.returncode != 0:
         _check(_run(run, ["docker", "network", "create", "--internal", NETWORK]), "network create")
+    elif (inspect.stdout or "").strip() != "true":
+        raise RuntimeError("build network is not internal")
 
     with tempfile.TemporaryDirectory() as ctx:
         ctx_dir = Path(ctx)
         shutil.copy(DOCKER_DIR / "proxy" / "Dockerfile", ctx_dir / "Dockerfile")
-        (ctx_dir / "tinyproxy.conf").write_text(render_proxy_conf(), encoding="utf-8")
-        (ctx_dir / "filter").write_text(render_filter(cfg.builds.allow_hosts), encoding="utf-8")
+        (ctx_dir / "tinyproxy.conf").write_text(render_proxy_conf(), encoding="utf-8", newline="\n")
+        (ctx_dir / "filter").write_text(
+            render_filter(cfg.builds.allow_hosts), encoding="utf-8", newline="\n"
+        )
         _check(_run(run, ["docker", "build", "-t", PROXY_IMAGE, str(ctx_dir)]), "proxy build")
 
     image_id = _run(run, ["docker", "image", "inspect", "-f", "{{.Id}}", PROXY_IMAGE])
@@ -138,12 +156,22 @@ def ensure_image(cfg, run=subprocess.run) -> None:
     _check(_run(run, build), "image build")
 
 
+def _remove_stale_key_files() -> None:
+    """Delete key files a killed run left behind (older than two hours)."""
+    cutoff = time.time() - STALE_KEY_FILE_S
+    for path in Path(tempfile.gettempdir()).glob(KEY_FILE_PREFIX + "*"):
+        with contextlib.suppress(OSError):
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+
+
 @contextlib.contextmanager
 def api_key_env_file(api_key: str) -> Iterator[Path]:
     """Temp env file holding only the API key, owner-only, deleted on exit."""
     if not api_key or "\n" in api_key or "\r" in api_key:
         raise ValueError("invalid API key")
-    fd, name = tempfile.mkstemp(prefix="radar-env-", suffix=".env")  # mkstemp: mode 0600
+    _remove_stale_key_files()
+    fd, name = tempfile.mkstemp(prefix=KEY_FILE_PREFIX, suffix=".env")  # mkstemp: mode 0600
     path = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -167,6 +195,13 @@ def build_argv(cfg, workdir: Path, name: str, env_file: Path | None = None) -> l
     """argv for the Claude build container. `env_file` carries ANTHROPIC_API_KEY only."""
     argv = _base_argv(cfg, name)
     argv += ["--env", f"MODEL={cfg.builds.claude_model}", "--env", f"TURNS={cfg.builds.max_turns}"]
+    argv += ["--env", f"BUILD_TIMEOUT_S={int(cfg.builds.timeout_min * 60)}"]
+    argv += [
+        "--env",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+        "--env",
+        "DISABLE_AUTOUPDATER=1",
+    ]
     if env_file is not None:
         argv += ["--env-file", str(env_file)]
     return argv + ["-v", f"{workdir}:/work", cfg.builds.image, ENTRY]
@@ -198,6 +233,17 @@ def remove(name: str, run=subprocess.run) -> None:
     """Force-remove a container; a missing one is fine, and so is a daemon that times out."""
     with contextlib.suppress(subprocess.TimeoutExpired):
         _run(run, ["docker", "rm", "-f", name], timeout=60)
+
+
+def remove_build_containers(run=subprocess.run) -> None:
+    """Best effort: force-remove every build container (after a cancelled or killed run)."""
+    try:
+        proc = _run(run, ["docker", "ps", "-q", "--filter", f"name={BUILD_PREFIX}"], timeout=30)
+        ids = (proc.stdout or "").split() if proc.returncode == 0 else []
+        if ids:
+            _run(run, ["docker", "rm", "-f", *ids], timeout=60)
+    except Exception:  # noqa: BLE001, S110 - cleanup must never raise
+        pass
 
 
 def is_running(name: str, run=subprocess.run) -> bool:

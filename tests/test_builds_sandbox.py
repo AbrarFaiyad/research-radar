@@ -65,6 +65,9 @@ def test_only_fixed_env_flags(cfg, tmp_path, monkeypatch):
         "PYTHONDONTWRITEBYTECODE",
         "MODEL",
         "TURNS",
+        "BUILD_TIMEOUT_S",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "DISABLE_AUTOUPDATER",
     }
     assert "nope" not in " ".join(argv)
     assert "ANTHROPIC_API_KEY" not in " ".join(values)
@@ -197,6 +200,8 @@ def test_ensure_network_and_proxy_creates_everything(cfg):
 
 def test_ensure_network_and_proxy_noop_when_current(cfg):
     def handler(argv):
+        if argv[1:3] == ["network", "inspect"]:
+            return _proc(0, "true\n")
         if argv[1:3] == ["image", "inspect"]:
             return _proc(0, "sha256:abc")
         if argv[1] == "inspect":
@@ -253,3 +258,111 @@ def test_remove_and_is_running_survive_timeouts():
 
     sandbox.remove("c1", Recorder(hang))
     assert sandbox.is_running("c1", Recorder(hang)) is True
+
+
+def test_run_decodes_utf8_progress_bars_on_any_locale():
+    import sys
+
+    # pip's progress bar: U+2501 is E2 94 81, and 0x81 is undefined in cp1252.
+    code = r"import sys; sys.stdout.buffer.write(b'\xe2\x94\x81 done \x81')"
+    proc = sandbox._run(subprocess.run, [sys.executable, "-c", code], timeout=60)
+    assert proc.returncode == 0
+    assert proc.stdout.startswith("\u2501 done ")
+
+
+def test_build_argv_sets_in_container_time_limit_and_quiet_claude(cfg, tmp_path):
+    cfg.builds.timeout_min = 7
+    argv = build_argv(cfg, tmp_path, "rb-1")
+    values = [argv[i + 1] for i, a in enumerate(argv) if a == "--env"]
+    assert "BUILD_TIMEOUT_S=420" in values
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in values
+    assert "DISABLE_AUTOUPDATER=1" in values
+
+
+def test_entry_script_wraps_claude_in_timeout():
+    text = (sandbox.DOCKER_DIR / "build" / "entry.sh").read_text(encoding="utf-8")
+    assert 'timeout --kill-after=30 "$BUILD_TIMEOUT_S" claude -p' in text
+
+
+def test_env_file_prefix_and_stale_cleanup(tmp_path, monkeypatch):
+    import os
+    import tempfile
+    import time
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    stale = tmp_path / "radar-key-old.env"
+    stale.write_text("ANTHROPIC_API_KEY=x\n", encoding="utf-8")
+    old = time.time() - 3 * 3600
+    os.utime(stale, (old, old))
+    fresh = tmp_path / "radar-key-new.env"
+    fresh.write_text("ANTHROPIC_API_KEY=y\n", encoding="utf-8")
+    other = tmp_path / "unrelated.env"
+    other.write_text("x", encoding="utf-8")
+    os.utime(other, (old, old))
+    with api_key_env_file("sk-test-123") as path:
+        assert path.name.startswith("radar-key-") and path.parent == tmp_path
+        assert not stale.exists() and fresh.exists() and other.exists()
+    assert not path.exists()
+
+
+def test_remove_build_containers_removes_every_radar_build():
+    def handler(argv):
+        if argv[:2] == ["docker", "ps"]:
+            return _proc(0, "abc123\ndef456\n")
+        return _proc()
+
+    rec = Recorder(handler)
+    sandbox.remove_build_containers(rec)
+    assert rec.calls[0] == ["docker", "ps", "-q", "--filter", "name=radar-build-"]
+    assert rec.calls[1] == ["docker", "rm", "-f", "abc123", "def456"]
+    assert all(set(env) <= set(sandbox._env()) for env in rec.envs)
+
+
+def test_remove_build_containers_ignores_errors():
+    def boom(argv, **kw):
+        raise FileNotFoundError("docker")
+
+    sandbox.remove_build_containers(boom)
+    rec = Recorder(lambda a: _proc(0, ""))
+    sandbox.remove_build_containers(rec)
+    assert len(rec.calls) == 1  # nothing to remove
+
+
+def test_existing_network_must_be_internal(cfg):
+    def handler(argv):
+        if argv[1:3] == ["network", "inspect"]:
+            return _proc(0, "false\n")
+        return _proc(0, "sha256:abc true")
+
+    rec = Recorder(handler)
+    with pytest.raises(RuntimeError, match="build network is not internal"):
+        ensure_network_and_proxy(cfg, rec)
+    assert not any(c[:2] == ["docker", "run"] for c in rec.calls)
+
+
+def test_proxy_files_use_lf_newlines(cfg):
+    seen = {}
+
+    def handler(argv):
+        if argv[1:3] == ["network", "inspect"]:
+            return _proc(0, "true\n")
+        if argv[1] == "build":
+            ctx = Path(argv[-1])
+            seen["filter"] = (ctx / "filter").read_bytes()
+            seen["conf"] = (ctx / "tinyproxy.conf").read_bytes()
+        return _proc(0, "sha256:abc true")
+
+    ensure_network_and_proxy(cfg, Recorder(handler))
+    assert b"\r\n" not in seen["filter"] and b"\r\n" not in seen["conf"]
+
+
+def test_image_files_carry_pins_and_notes():
+    proxy = (sandbox.DOCKER_DIR / "proxy" / "Dockerfile").read_text(encoding="utf-8")
+    assert '"tinyproxy>=1.11.2"' in proxy and "FilterType" in proxy
+    build = (sandbox.DOCKER_DIR / "build" / "Dockerfile").read_text(encoding="utf-8")
+    assert "[builds] image" in build
+
+
+def test_schedule_allows_four_hours():
+    text = (sandbox.REPO_ROOT / "scripts" / "install_schedule.ps1").read_text(encoding="utf-8")
+    assert "-ExecutionTimeLimit (New-TimeSpan -Hours 4)" in text
