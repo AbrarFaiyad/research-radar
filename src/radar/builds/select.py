@@ -78,6 +78,8 @@ def package_slug(code_url: str, title: str) -> str:
 
 
 def folder_name(day: str, package: str, task: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError(f"day must be YYYY-MM-DD, got {day!r}")
     return f"{day}_{_slugify(package)}_{_slugify(task)}"
 
 
@@ -114,6 +116,10 @@ def pick(result: dict, built: set[str]) -> tuple[Candidate | None, str]:
     return None, NO_ITEM
 
 
+class HistoryCorrupt(RuntimeError):
+    """The history file exists but cannot be read; it is left untouched."""
+
+
 class History:
     """JSON record of published builds and attempts."""
 
@@ -122,11 +128,19 @@ class History:
 
     def _load(self) -> dict:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return {"published": [], "attempts": []}
+        except OSError as exc:
+            raise HistoryCorrupt(f"cannot read {self.path}: {exc}") from exc
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("top level is not an object")
+        except ValueError as exc:
+            raise HistoryCorrupt(
+                f"{self.path} is corrupt ({exc}); file left untouched, fix or delete it"
+            ) from exc
         data.setdefault("published", [])
         data.setdefault("attempts", [])
         return data

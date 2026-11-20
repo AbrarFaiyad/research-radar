@@ -1,4 +1,6 @@
-from radar.builds.select import History, folder_name, package_slug, pick
+import pytest
+
+from radar.builds.select import History, HistoryCorrupt, folder_name, package_slug, pick
 
 NO_ITEM = "no item with public code, an open license, and a CPU demo"
 
@@ -80,3 +82,20 @@ def test_history_counts_only_published(tmp_path):
     assert h.built() == {"b"}
     assert h.published_on("2026-11-21") and not h.published_on("2026-11-22")
     assert History(tmp_path / "sub" / "history.json").built() == {"b"}
+
+
+@pytest.mark.parametrize("day", ["../x", "a/b", "2026-11-2", "", "2026-11-21/"])
+def test_folder_name_rejects_bad_day(day):
+    with pytest.raises(ValueError):
+        folder_name(day, "p", "t")
+
+
+def test_corrupt_history_raises_and_is_untouched(tmp_path):
+    path = tmp_path / "history.json"
+    path.write_text("{not json", encoding="utf-8")
+    h = History(path)
+    for call in (h.built, lambda: h.add_attempt("a", "failed", "x"), lambda: h.published_on("d")):
+        with pytest.raises(HistoryCorrupt):
+            call()
+    assert path.read_bytes() == b"{not json"
+    assert list(tmp_path.iterdir()) == [path]
