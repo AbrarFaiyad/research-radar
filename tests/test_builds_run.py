@@ -492,8 +492,10 @@ def test_template_requirements():
     from radar.config import REPO_ROOT
 
     text = (REPO_ROOT / "prompts" / "build_task.md").read_text(encoding="utf-8")
-    for needle in ("pytest", "test_demo.py", "CPU only", "output/", "BUILD_LOG.md", "real output"):
+    for needle in ("CPU only", "output/", "BUILD_LOG.md", "real output", "requirements.txt"):
         assert needle in text
+    for gone in ("/work", "test_demo.py", "Docker", "proxy"):
+        assert gone not in text
     assert run_mod.TEMPLATE_RE.findall(text) == ["DAY", "FIELD_PROFILE", "ITEM_JSON"]
 
 
@@ -635,6 +637,16 @@ def test_tool_leftovers_are_removed_before_the_scan(on_cfg, digest, result):
         assert gone not in names
     assert not names & {".ipynb_checkpoints", ".pytest_cache", "__pycache__"}
     assert "clone" in names and "sub" in names
+
+
+def test_prompt_asks_for_notebook():
+    from radar.config import REPO_ROOT
+
+    text = (REPO_ROOT / "prompts" / "build_task.md").read_text(encoding="utf-8")
+    for needle in ("demo.ipynb", "Executive summary", "papermill", "ipykernel", "under 10 minutes"):
+        assert needle in text
+    assert "/tmp" in text
+    assert "relevance" not in text and "post_ids" not in text
 
 
 def test_prompt_sends_venvs_and_clones_to_tmp():
