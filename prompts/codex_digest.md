@@ -41,6 +41,9 @@ Fields:
   - relevance: 1 sentence on what this means for the reader's own work, as described in the field profile.
   - limitations: 1 to 2 sentences, from the source or your reading.
   - impact: "high" or "medium".
+  - code_url: the public code repository or package page for the work; an empty string if there is none.
+  - license: the SPDX id of that repository's license; an empty string if unknown.
+  - cpu_demo: true only if a tiny demo of the work can run on a laptop CPU in under 10 minutes; otherwise false.
 - podcast_focus: 2 to 4 sentences telling a podcast host what to emphasize: which items lead, the how and why of each, and the takeaways for this reader.
 
 ## Candidates
