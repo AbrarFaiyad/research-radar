@@ -155,7 +155,7 @@ def test_no_episode_is_skipped(pcfg):
         "Saved in C:\\Users\\someone\\Documents",
     ],
 )
-def test_personal_marker_in_text_skips_before_any_release_call(pcfg, headline, monkeypatch):
+def test_personal_marker_in_text_skips_before_any_release_call(pcfg, headline):
     pcfg.email.to = "owner.name@example.org"
     folder = make_folder(pcfg)
     gh = FakeGh()
@@ -307,7 +307,7 @@ def test_job_actions():
 RES = {"headline": "H", "items": [{"title": "T", "primary_url": "https://example.org/x"}]}
 
 
-def daily_setup(cfg, monkeypatch, *, digest=True):
+def daily_setup(cfg, monkeypatch, *, digest=True, gh=None, headline="H"):
     cfg.notebooklm.enabled = False
     cfg.email.enabled = False  # the real config may enable email; never send from a test
     monkeypatch.setattr(cli, "stage_email", lambda *a, **k: pytest.fail("email sent"))
@@ -318,7 +318,8 @@ def daily_setup(cfg, monkeypatch, *, digest=True):
         if not digest:
             return None
         folder = make_folder(cfg_)
-        (folder / "codex_result.json").write_text(json.dumps(RES), encoding="utf-8")
+        res = {**RES, "headline": headline}
+        (folder / "codex_result.json").write_text(json.dumps(res), encoding="utf-8")
         return SimpleNamespace(
             kept=1, reviewed=1, summary_md=folder / "summary.md", audio=None, folder=folder
         )
@@ -331,7 +332,11 @@ def daily_setup(cfg, monkeypatch, *, digest=True):
         calls.append((folder.name, result["headline"]))
         return {"tag": folder.name, "status": "published"}
 
-    monkeypatch.setattr(podcasts, "publish", fake_publish)
+    if gh is None:
+        monkeypatch.setattr(podcasts, "publish", fake_publish)
+    else:  # the real publisher with a fake gh
+        real = podcasts.publish
+        monkeypatch.setattr(podcasts, "publish", lambda c, f, r, gh_=gh: real(c, f, r, gh=gh_))
     return calls
 
 
@@ -394,3 +399,73 @@ def test_cli_publish_and_init_repo(pcfg, monkeypatch, capsys):
     args = cli.build_parser().parse_args(["podcast", "--init-repo"])
     assert cli.cmd_podcast(pcfg, args) == 0
     assert "https://github.com/x/y" in capsys.readouterr().out
+
+
+# ---- review fixes ---------------------------------------------------------------------------------
+def test_notes_are_only_titles_and_links(pcfg):
+    folder = make_folder(pcfg)
+    gh = FakeGh()
+    podcasts.publish(pcfg, folder, RESULT, gh=gh)
+    notes = next(i for a, i in gh.calls if a[:2] == ["release", "create"])
+    assert notes == "- LoRA for MACE: https://arxiv.org/abs/2611.00001\n- No link item\n"
+
+
+def test_only_http_links_are_published(pcfg):
+    folder = make_folder(pcfg)
+    items = [
+        {"title": "A", "primary_url": "file:///x/y"},
+        {"title": "B", "primary_url": "javascript:alert(1)"},
+        {"title": "C", "primary_url": "HTTP://example.org/c"},
+    ]
+    gh = FakeGh()
+    podcasts.publish(pcfg, folder, {"headline": "H", "items": items}, gh=gh)
+    notes = next(i for a, i in gh.calls if a[:2] == ["release", "create"])
+    assert notes == "- A\n- B\n- C: HTTP://example.org/c\n"
+
+
+def test_later_skip_or_failure_keeps_published_record(pcfg):
+    folder = make_folder(pcfg)
+    first = podcasts.publish(pcfg, folder, RESULT, gh=FakeGh())
+    assert first["status"] == "published"
+    pcfg.email.to = "a@b.example.org"
+    marked = {**RESULT, "headline": "mail a@b.example.org"}
+    skipped = podcasts.publish(pcfg, folder, marked, gh=FakeGh())
+    assert skipped["status"] == "skipped" and record(folder) == first
+    failed = podcasts.publish(pcfg, folder, RESULT, gh=FakeGh(release=None, fail=[("release",)]))
+    assert failed["status"] == "failed" and record(folder) == first
+
+
+def test_prepare_failure_is_failed_with_fixed_phrase(pcfg, monkeypatch):
+    import radar.podcast
+
+    def boom(path):
+        raise RuntimeError("decoder crashed on C:/Users/someone/x.m4a")
+
+    monkeypatch.setattr(radar.podcast, "email_ready", boom)
+    folder = make_folder(pcfg)
+    gh = FakeGh()
+    rec = podcasts.publish(pcfg, folder, RESULT, gh=gh)
+    assert rec == {"tag": "2026-11-21", "status": "failed", "reason": "could not prepare episode"}
+    assert gh.calls == [] and record(folder) == rec
+
+
+def test_daily_all_gh_calls_fail_reports_fixed_phrase_and_rc0(pcfg, monkeypatch):
+    gh = FakeGh(release=None, fail=[("release",)])
+    daily_setup(pcfg, monkeypatch, gh=gh)
+    assert cli.cmd_daily(pcfg, SimpleNamespace()) == 0
+    st = stages(pcfg)["podcast-publish"]
+    assert not st["ok"] and st["optional"]
+    assert podcasts.FAILED in st["error"] and "SECRET" not in st["error"]
+    assert ("release", "view") in gh.verbs() and ("release", "create") in gh.verbs()
+    folder = pcfg.digests_dir / "2026-11-21"
+    assert record(folder)["status"] == "failed"
+
+
+def test_daily_marker_in_headline_skips_without_release_call_and_rc0(pcfg, monkeypatch):
+    pcfg.email.to = "owner.name@example.org"
+    gh = FakeGh()
+    daily_setup(pcfg, monkeypatch, gh=gh, headline="mail owner.name@example.org")
+    assert cli.cmd_daily(pcfg, SimpleNamespace()) == 0
+    st = stages(pcfg)["podcast-publish"]
+    assert st["ok"] and st["skipped"] and podcasts.PERSONAL in st["error"]
+    assert gh.calls == []

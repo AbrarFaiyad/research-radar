@@ -45,15 +45,16 @@ def _episode(folder: Path) -> Path | None:
 
 
 def _notes(result: dict) -> str:
-    lines = ["Kept in today's digest:", ""]
+    lines = []
     for item in result.get("items") or []:
         if not isinstance(item, dict):
             continue
         title = " ".join(str(item.get("title") or "").split())
         link = str(item.get("primary_url") or "").strip()
+        if not link.lower().startswith(("http://", "https://")):
+            link = ""
         if title:
             lines.append(f"- {title}: {link}" if link else f"- {title}")
-    lines += ["", README_TEXT.strip()]
     return "\n".join(lines) + "\n"
 
 
@@ -71,6 +72,12 @@ def _has_personal_info(cfg: Config, title: str, notes: str) -> bool:
 
 def _write(folder: Path, rec: dict) -> dict:
     path = folder / "podcast.json"
+    if rec["status"] != "published":
+        try:  # a later skip or failure must not erase a published record
+            if json.loads(path.read_text(encoding="utf-8")).get("status") == "published":
+                return rec
+        except (OSError, ValueError, AttributeError):
+            pass
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
     os.replace(tmp, path)

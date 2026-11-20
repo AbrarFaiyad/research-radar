@@ -487,7 +487,7 @@ async function loadSettings() {
   const d = await api("/api/settings"); schema = d.schema;
   const bySec = {}; schema.forEach(f => (bySec[f.section] ||= []).push(f));
   const LABELS = {profile: "Reader", scan: "Feed scan", browser: "Agent browser", llm: "Local model",
-    digest: "Codex digest", notebooklm: "NotebookLM podcast", email: "Daily email", builds: "Daily builds"};
+    digest: "Codex digest", notebooklm: "NotebookLM podcast", email: "Daily email", builds: "Daily builds", podcasts: "Podcast publishing"};
   $("#settings-form").innerHTML = Object.entries(bySec).map(([sec, fs]) => `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.map(f => {
     const v = d.values[f.id]; let input;
     if (f.kind === "bool") input = `<input type="checkbox" name="${f.id}" ${v ? "checked" : ""}>`;

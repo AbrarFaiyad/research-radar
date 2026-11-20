@@ -1,9 +1,10 @@
 import json
+import smtplib
 from pathlib import Path
 
 import pytest
 
-from radar.config import BuildsCfg, PodcastsCfg, load_config
+from radar.config import BuildsCfg, EmailCfg, NotebookLMCfg, PodcastsCfg, load_config
 from radar.db import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -98,6 +99,17 @@ def _build_data_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_mail(monkeypatch):
+    """No test may open an SMTP connection."""
+
+    def refuse(*a, **k):
+        raise AssertionError("tests must not send email")
+
+    monkeypatch.setattr(smtplib, "SMTP", refuse)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = load_config(root=Path(__file__).resolve().parents[1])
@@ -106,6 +118,9 @@ def cfg(tmp_path):
     c.builds = BuildsCfg(work_dir=str(tmp_path / "builds"))
     # same for podcast publishing: disabled, never the owner's repo
     c.podcasts = PodcastsCfg()
+    # never the owner's real email or NotebookLM settings
+    c.email = EmailCfg()
+    c.notebooklm = NotebookLMCfg(enabled=False)
     return c
 
 
