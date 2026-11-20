@@ -86,6 +86,7 @@ class Config:
     digest: DigestCfg
     notebooklm: NotebookLMCfg
     email: EmailCfg = field(default_factory=EmailCfg)
+    source: Path | None = None  # the TOML file this config came from
 
     @property
     def db_path(self) -> Path:
@@ -133,4 +134,5 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         digest=_section(raw, "digest", DigestCfg),
         notebooklm=_section(raw, "notebooklm", NotebookLMCfg),
         email=_section(raw, "email", EmailCfg),
+        source=path.resolve() if path.exists() else None,
     )

@@ -5,7 +5,7 @@ from radar.doctor import Probes, run_checks
 
 def _probes(tmp_path, **kw):
     pw_dir = tmp_path / "ms-playwright"
-    (pw_dir / "chromium-1255").mkdir(parents=True)
+    (pw_dir / "chromium-1255").mkdir(parents=True, exist_ok=True)
     base = {
         "which": lambda exe: f"C:/bin/{exe}.exe",
         "http_get": lambda url: {"models": [{"name": "mimo-v2.6:latest"}]},
@@ -67,3 +67,11 @@ def test_mask_hides_personal_details(tmp_path):
     assert out.startswith(".") and "browser-profile" in out
     assert str(root) not in out and str(Path.home()) not in out
     assert "s***@gmail.com" in out and "someone.name" not in out
+
+
+def test_model_tag_must_match(cfg, tmp_path):
+    cfg.llm.model = "mimo-v2.6:9b-q8"
+    checks = _by_name(run_checks(cfg, _probes(tmp_path)))
+    assert not checks["local model"].ok  # only :latest is installed
+    cfg.llm.model = "mimo-v2.6"
+    assert _by_name(run_checks(cfg, _probes(tmp_path)))["local model"].ok

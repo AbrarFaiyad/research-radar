@@ -59,6 +59,8 @@ def stage_scan(cfg: Config, max_posts: int | None = None, from_file: str | None 
         print("  error:", e)
     md, _, n = write_queue(store, cfg.queue_dir)
     print(f"queue: {n} people -> {md}")
+    if rep.new and len(rep.errors) >= rep.new:
+        raise RuntimeError(f"all {rep.new} new posts failed classification: {rep.errors[0]}")
     return {
         "seen": rep.seen,
         "new": rep.new,
@@ -207,13 +209,15 @@ def cmd_queue(cfg, args) -> int:
 def cmd_login(cfg, args) -> int:
     from .scanner import login_flow
 
-    return 0 if asyncio.run(login_flow(cfg)) else 1
+    with RunLock(cfg, owner="login"):  # the scan uses the same browser profile
+        return 0 if asyncio.run(login_flow(cfg)) else 1
 
 
 def cmd_notebooklm_login(cfg, args) -> int:
     from .notebooklm import login_flow
 
-    return 0 if asyncio.run(login_flow(cfg)) else 1
+    with RunLock(cfg, owner="notebooklm-login"):
+        return 0 if asyncio.run(login_flow(cfg)) else 1
 
 
 def cmd_email_setup(cfg, args) -> int:

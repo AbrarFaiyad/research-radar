@@ -39,6 +39,7 @@ class Job:
     lines: deque = field(default_factory=lambda: deque(maxlen=5000))
     offset: int = 0  # number of lines dropped from the front of `lines`
     proc: subprocess.Popen | None = None
+    guard: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def running(self) -> bool:
@@ -56,8 +57,14 @@ class Job:
 
 
 class JobRunner:
-    def __init__(self, root: Path, data_dir: Path, python: str = sys.executable):
-        self.root, self.data_dir, self.python = root, data_dir, python
+    def __init__(
+        self,
+        root: Path,
+        data_dir: Path,
+        python: str = sys.executable,
+        config: Path | None = None,
+    ):
+        self.root, self.data_dir, self.python, self.config = root, data_dir, python, config
         self.current: Job | None = None
         self._lock = threading.Lock()
 
@@ -73,6 +80,7 @@ class JobRunner:
                 "radar.cli",
                 "--data-dir",
                 str(self.data_dir),
+                *(["--config", str(self.config)] if self.config else []),
                 *ACTIONS[action],
                 *(extra or []),
             ]
@@ -97,9 +105,10 @@ class JobRunner:
     def _pump(self, job: Job) -> None:
         assert job.proc and job.proc.stdout
         for line in job.proc.stdout:
-            if len(job.lines) == job.lines.maxlen:
-                job.offset += 1
-            job.lines.append(line.rstrip("\n"))
+            with job.guard:
+                if len(job.lines) == job.lines.maxlen:
+                    job.offset += 1
+                job.lines.append(line.rstrip("\n"))
         job.returncode = job.proc.wait()
         job.finished = time.time()
 
@@ -107,9 +116,10 @@ class JobRunner:
         job = self.current
         if job is None:
             return {"job": None, "lines": [], "next": 0}
-        start = max(since - job.offset, 0)
-        lines = list(job.lines)[start:]
-        return {"job": job.summary(), "lines": lines, "next": job.offset + len(job.lines)}
+        with job.guard:
+            offset, snapshot = job.offset, list(job.lines)
+        start = max(since - offset, 0)
+        return {"job": job.summary(), "lines": snapshot[start:], "next": offset + len(snapshot)}
 
     def cancel(self) -> bool:
         job = self.current

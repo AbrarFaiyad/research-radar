@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Protocol
 
 import httpx
+
+
+def model_tag(name: str) -> str:
+    """Normalize an Ollama model name: no tag means ":latest"."""
+    name = name.strip()
+    return name if ":" in name else f"{name}:latest"
 
 
 class ChatModel(Protocol):
@@ -26,6 +33,8 @@ class OllamaModel:
         self.num_ctx = num_ctx
         self.timeout_s = timeout_s
         self.think = think
+        self.attempts = 2
+        self.backoff_s = 2.0
 
     def json_chat(self, system: str, user: str, schema: dict) -> dict:
         payload: dict[str, Any] = {
@@ -39,15 +48,22 @@ class OllamaModel:
                 {"role": "user", "content": user},
             ],
         }
-        r = httpx.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout_s)
-        r.raise_for_status()
-        content = r.json()["message"]["content"]
-        return json.loads(content)
+        last: Exception | None = None
+        for attempt in range(self.attempts):
+            try:
+                r = httpx.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout_s)
+                r.raise_for_status()
+                return json.loads(r.json()["message"]["content"])
+            except (httpx.TimeoutException, httpx.TransportError, ValueError, KeyError) as e:
+                last = e  # transient: model loading, a dropped connection, truncated JSON
+                if attempt + 1 < self.attempts:
+                    time.sleep(self.backoff_s * (attempt + 1))
+        raise RuntimeError(f"local model failed after {self.attempts} attempts: {last}") from last
 
     def available(self) -> bool:
         try:
             r = httpx.get(f"{self.host}/api/tags", timeout=5)
-            names = {m["name"].split(":")[0] for m in r.json().get("models", [])}
-            return self.model.split(":")[0] in names
+            names = {model_tag(m["name"]) for m in r.json().get("models", [])}
+            return model_tag(self.model) in names
         except (httpx.HTTPError, ValueError, KeyError):
             return False

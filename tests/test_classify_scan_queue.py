@@ -225,3 +225,18 @@ def test_allowlist_blocks_click_tools(tmp_path):
     for tool in ("browser_click", "browser_type", "browser_run_code_unsafe", "browser_fill_form"):
         with pytest.raises(ToolNotAllowed):
             _run(b.call(tool, {}))
+
+
+def test_scan_stage_fails_when_every_post_fails(cfg, monkeypatch):
+    from radar import cli
+
+    class Rep:
+        seen, new, saved, skipped, errors = 3, 3, 0, 0, ["classify A: timeout"] * 3
+
+        def line(self):
+            return "x"
+
+    monkeypatch.setattr(cli, "_model", lambda c: None)
+    monkeypatch.setattr("radar.scanner.scan_file", lambda *a, **k: Rep())
+    with pytest.raises(RuntimeError, match="all 3 new posts failed"):
+        cli.stage_scan(cfg, from_file="x.json")

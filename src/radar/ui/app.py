@@ -37,12 +37,13 @@ def create_app(
     token = token or secrets.token_urlsafe(24)
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}", "testserver"}
     allowed_origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}", "http://testserver"}
-    runner = runner or JobRunner(cfg.root, cfg.data_dir)
+    custom_config = cfg.source if cfg.source and cfg.source.name != "config.example.toml" else None
+    runner = runner or JobRunner(cfg.root, cfg.data_dir, config=custom_config)
     app = FastAPI(title="Research Radar", version=__version__, docs_url=None, redoc_url=None)
     app.state.token, app.state.runner = token, runner
 
     def fresh() -> Config:
-        c = load_config(root=cfg.root)
+        c = load_config(custom_config, root=cfg.root)
         c.data_dir = cfg.data_dir
         return c
 

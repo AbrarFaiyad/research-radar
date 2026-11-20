@@ -175,3 +175,58 @@ def test_reader_comes_from_config_not_hardcoded(store, cfg):
     task = build_codex_task(store.saved_posts(), "p", template, 5, 15, reader="a battery chemist")
     assert "The reader is a battery chemist." in task
     assert "molten salts, MoS2" not in task
+
+
+def test_run_codex_retries_once(monkeypatch):
+    import subprocess
+
+    from radar import digest
+
+    calls = []
+
+    class P:
+        def __init__(self, rc):
+            self.returncode, self.stderr = rc, "boom"
+
+    def fake_run(*a, **k):
+        calls.append(1)
+        return P(1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    digest.run_codex(["codex"], "task")
+    assert len(calls) == 2
+    calls.clear()
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: P(1))
+    import pytest
+
+    with pytest.raises(RuntimeError, match="codex exited 1"):
+        digest.run_codex(["codex"], "task")
+
+
+def test_local_model_retries_transient_errors(monkeypatch):
+    import httpx
+
+    from radar.llm import OllamaModel
+
+    m = OllamaModel("http://x", "m")
+    m.backoff_s = 0
+    seq = [httpx.ReadTimeout("slow"), {"message": {"content": '{"ok": true}'}}]
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    def fake_post(*a, **k):
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return R(item)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert m.json_chat("s", "u", {}) == {"ok": True}

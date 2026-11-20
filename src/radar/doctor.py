@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 
 from .config import Config
+from .llm import model_tag
 
 TASK_NAME = "ResearchRadarDaily"
 
@@ -81,9 +82,9 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
 
     try:
         tags = p.http_get(f"{cfg.llm.host.rstrip('/')}/api/tags")
-        names = {m["name"].split(":")[0] for m in tags.get("models", [])}
+        names = {model_tag(m["name"]) for m in tags.get("models", [])}
         out.append(Check("ollama", True, f"reachable at {cfg.llm.host}"))
-        has = cfg.llm.model.split(":")[0] in names
+        has = model_tag(cfg.llm.model) in names
         out.append(
             Check(
                 "local model",

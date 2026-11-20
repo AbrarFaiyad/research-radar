@@ -183,3 +183,40 @@ def test_digest_html_is_sanitized():
         '<a rel="noopener noreferrer" target="_blank" href="https://arxiv.org/abs/2611.1">' in html
     )
     assert "javascript:" not in html and "<strong>bold</strong>" in html
+
+
+def test_nan_and_infinity_rejected(client):
+    client.get("/api/settings")
+    r = client.post(
+        "/api/settings", json={"scan.max_minutes": "nan", "llm.timeout_s": "inf"}, headers=H
+    )
+    assert r.status_code == 400
+    assert set(r.json()["errors"]) == {"scan.max_minutes", "llm.timeout_s"}
+
+
+def test_jobs_pass_custom_config(tmp_path):
+    from radar.ui.jobs import JobRunner
+
+    r = JobRunner(tmp_path, tmp_path / "data", python="py", config=tmp_path / "alt.toml")
+    started = {}
+
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            started["argv"] = argv
+            self.stdout = iter(())
+            self.pid = 1
+
+        def wait(self):
+            return 0
+
+    import subprocess
+
+    orig = subprocess.Popen
+    subprocess.Popen = FakePopen
+    try:
+        r.start("scan", ["--max-posts", "5"])
+    finally:
+        subprocess.Popen = orig
+    argv = started["argv"]
+    assert argv[argv.index("--config") + 1] == str(tmp_path / "alt.toml")
+    assert argv[-3:] == ["scan", "--max-posts", "5"]

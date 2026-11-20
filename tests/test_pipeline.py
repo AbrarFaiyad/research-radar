@@ -36,7 +36,7 @@ def test_failed_stage_does_not_stop_later_stages(cfg):
 def test_lock_refuses_second_holder_and_releases(cfg):
     lock = RunLock(cfg, owner="panel")
     with lock:
-        other = {"pid": os.getpid() + 1, "owner": "scheduler", "since": time.time()}
+        other = {"pid": os.getppid(), "owner": "scheduler", "since": time.time()}
         lock.path.write_text(json.dumps(other), encoding="utf-8")
         with pytest.raises(LockHeld, match="scheduler"):
             RunLock(cfg).__enter__()
@@ -55,3 +55,55 @@ def test_stale_lock_is_taken_over(cfg):
     )
     with lock:
         assert json.loads(lock.path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+
+def test_lock_of_dead_process_is_stale(cfg):
+    import subprocess
+    import sys
+
+    from radar.pipeline import pid_alive
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    assert pid_alive(os.getpid()) and not pid_alive(proc.pid)
+    lock = RunLock(cfg)
+    lock.path.parent.mkdir(parents=True, exist_ok=True)
+    lock.path.write_text(
+        json.dumps({"pid": proc.pid, "owner": "cancelled", "since": time.time()}), encoding="utf-8"
+    )
+    assert lock.holder() is None
+    with lock:
+        pass
+
+
+def test_lock_held_by_another_live_process(cfg, tmp_path):
+    import subprocess
+    import sys
+    import textwrap
+
+    ready = tmp_path / "ready"
+    child = textwrap.dedent(f"""
+        import time, pathlib
+        from radar.config import load_config
+        from radar.pipeline import RunLock
+        cfg = load_config()
+        cfg.data_dir = pathlib.Path(r"{cfg.data_dir}")
+        with RunLock(cfg, owner="scheduler"):
+            pathlib.Path(r"{ready}").write_text("x")
+            time.sleep(20)
+    """)
+    proc = subprocess.Popen([sys.executable, "-c", child])
+    try:
+        for _ in range(200):
+            if ready.exists():
+                break
+            time.sleep(0.05)
+        assert ready.exists(), "child never took the lock"
+        with pytest.raises(LockHeld, match="scheduler"):
+            RunLock(cfg).__enter__()
+    finally:
+        proc.kill()
+        proc.wait()
+    # The killed child's lock is now stale and can be taken over.
+    with RunLock(cfg):
+        pass

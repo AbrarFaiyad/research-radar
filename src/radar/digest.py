@@ -173,7 +173,18 @@ def codex_command(cfg: Config, folder: Path, schema_path: Path, out_path: Path) 
     return cmd
 
 
-def run_codex(cmd: list[str], task: str, timeout_s: int = 3600) -> None:
+def run_codex(cmd: list[str], task: str, timeout_s: int = 3600, attempts: int = 2) -> None:
+    """Run Codex; one retry covers transient network or service errors."""
+    for attempt in range(attempts):
+        try:
+            _run_codex_once(cmd, task, timeout_s)
+            return
+        except (RuntimeError, subprocess.TimeoutExpired):
+            if attempt + 1 == attempts:
+                raise
+
+
+def _run_codex_once(cmd: list[str], task: str, timeout_s: int) -> None:
     proc = subprocess.run(
         cmd,
         input=task,

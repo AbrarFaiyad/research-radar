@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -111,6 +112,8 @@ def coerce(f: Field, raw: Any) -> Any:
             num = int(raw) if f.kind == "int" else float(raw)
         except (TypeError, ValueError):
             raise ValueError("must be a number") from None
+        if not math.isfinite(num):
+            raise ValueError("must be a finite number")
         if f.kind == "int" and isinstance(raw, float) and not raw.is_integer():
             raise ValueError("must be a whole number")
         if (f.lo is not None and num < f.lo) or (f.hi is not None and num > f.hi):
