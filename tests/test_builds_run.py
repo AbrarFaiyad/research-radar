@@ -643,7 +643,17 @@ def test_prompt_asks_for_notebook():
     from radar.config import REPO_ROOT
 
     text = (REPO_ROOT / "prompts" / "build_task.md").read_text(encoding="utf-8")
-    for needle in ("demo.ipynb", "Executive summary", "papermill", "ipykernel", "under 10 minutes"):
+    for needle in (
+        "demo.ipynb",
+        "Executive summary",
+        "papermill",
+        "ipykernel",
+        "under 10 minutes",
+        "1 MB",
+        "python3",
+        "relative",
+        "%pip",
+    ):
         assert needle in text
     assert "/tmp" in text
     assert "relevance" not in text and "post_ids" not in text

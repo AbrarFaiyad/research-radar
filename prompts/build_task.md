@@ -28,7 +28,7 @@ demo.ipynb cells, in this order:
 
 1. First cell, markdown, headed "Executive summary": what the package is, the problem it solves, and what this demo shows, in at most 120 words.
 2. Core ideas in plain words.
-3. Install.
+3. Install: a markdown cell showing `pip install -r requirements.txt`. No `%pip` or `!pip` code cells.
 4. Step-by-step walkthrough of a tiny task from the reader's field, as runnable code cells with short markdown explanations between them.
 5. Results: the real output of the cells, plus any figures saved to output/.
 6. Gotchas found while building.
@@ -48,7 +48,9 @@ requirements.txt must include `papermill` and `ipykernel`, pinned like every oth
 ## Rules
 
 - Use CPU only. No GPU, no CUDA.
-- The notebook is executed afterwards from top to bottom with papermill. The whole notebook must run in under 10 minutes on CPU. Run it yourself with papermill before you finish, and keep the executed outputs in demo.ipynb.
+- After you finish, the workflow re-executes demo.ipynb with papermill (relative paths, kernel `python3`, 600 s per cell), so the notebook must run cleanly top to bottom on its own. The whole notebook must run in under 10 minutes on CPU.
+- Keep demo.ipynb under 1 MB: figures at most 100 dpi and about 6x4 inches, at most 5 inline figures, and print only short summaries (no large tables or arrays). Every file stays under 5 MB.
+- Set the notebook kernelspec to `python3`. If you test-run it, run `papermill demo.ipynb demo.ipynb` with relative paths from inside the build folder, using a venv under /tmp with ipykernel installed. Fix any failing cell and re-run, so no traceback outputs remain in the saved notebook.
 - Pin versions: every package in requirements.txt as `name==x.y.z`.
 - Network access is limited to package installs and documentation. Do not download large models or datasets; use tiny inputs you generate yourself.
 - Never invent results. Run the demo and show its real output. If something fails, say so in the notebook and in BUILD_LOG.md.
