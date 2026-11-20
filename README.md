@@ -19,6 +19,7 @@ Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [In
 - Sends every saved post to Codex, which keeps the 5 to 15 items with real impact, finds their primary sources and related coverage, and writes the digest.
 - Turns the digest into a NotebookLM Audio Overview, a two-host podcast.
 - Emails the digest, queue, and podcast to the owner each day.
+- Optionally builds one small demo per day of the top open-source item in a Docker sandbox and publishes it to a public repo. It is off by default.
 - Sets itself up from the control panel: a wizard builds your field profile from a CV, and every missing prerequisite has a fix button.
 - Lets you run any step, change settings and the schedule, and work through the queue and past digests, all from the panel.
 - Checks its own setup and records every daily run, stage by stage.
@@ -60,11 +61,17 @@ flowchart TD
         N4 -- no --> N5["Re-encode to MP3"]
     end
 
+    subgraph BUILD["Optional: daily build"]
+        B1["Daily build (optional)<br/>Docker sandbox → leak scan → public daily-builds repo"]
+    end
+
     C4 --> N1
+    C4 --> B1
     C4 --> E1
     Q --> E1
     N4 -- yes --> E1
     N5 --> E1
+    B1 --> E1
     E1(["5. Gmail to you<br/>digest, queue, podcast attached"])
 ```
 
@@ -80,6 +87,8 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Connections | `src/radar/connections.py` | Reads LinkedIn's data export so connections stay out of the queue |
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
+| Daily builds | `src/radar/builds/` | `select` picks the item, `sandbox` runs Claude in Docker, `run` coordinates the build and the clean-install check, `scan` checks every file for leaks, `publish` pushes to the public repo, `keys` stores the API key |
+| Build image | `docker/` | Builds the sandbox image and the allowlist proxy |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
 | Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
 | Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
@@ -233,6 +242,8 @@ You never need the command line after installing; every command here is a button
 | `radar podcast [folder]` | Make the podcast again for a digest | Digests, Make podcast |
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
 | `radar daily` | Scan, digest, and email as isolated stages, with a run record | Dashboard, Full daily run |
+| `radar build [folder] [--retry] [--prepare]` | Build and publish the day's demo from a digest. `--retry` runs a day that already has a record again. `--prepare` builds the Docker image and proxy and does not run a build | Daily builds, Retry; Setup, Build image |
+| `radar builds-key` | Store the Anthropic API key for builds (hidden prompt) | Setup, Daily builds key |
 | `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
 | `radar status` | Database counts, queue size, latest digest, last run | Dashboard |
 | `radar demo` | Classify synthetic posts into `data/demo/` with the local model | Setup, Offline demo |
@@ -246,6 +257,7 @@ Codex reviews every candidate once, and saved posts older than three days (`back
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
 - **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
+- **Build isolation.** Builds run in a Docker container on an internal network with an allowlist proxy. A second container runs the tests, and the host only copies plain files out. A leak scan blocks the push if it finds keys, personal details, local paths, or oversized files. Tests plant fake personal data and check that none of it reaches the container or the repo.
 - **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, only the redacted text is kept, and the wizard lets you keep it on your computer by drafting with the local model. The LinkedIn export is read in memory; only names, profile links, and dates are stored. Health checks mask email addresses and home-folder paths.
 - **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
@@ -293,6 +305,61 @@ Email goes out through Gmail SMTP with an App Password. An App Password is a 16-
 3. Press **Send a test email**.
 
 To revoke access, delete the App Password in your Google account.
+
+## Daily builds
+
+Reading about a package is not the same as using it. Once a day, Research Radar picks one open-source item from the digest. Claude Sonnet then builds a very small, complete demo with it. The demo is a learning kit that shows what the package is for and how to go from a blank folder to a result.
+
+Builds are published to one public GitHub repo. The feature is off by default.
+
+### What a build contains
+
+Each build is one folder named `YYYY-MM-DD_<package>_<task>`, in lowercase with hyphens, for example `2026-11-21_mace-torch_lora-finetune-molten-salt`. The folder holds:
+
+- `README.md`: the learning kit.
+- `demo.py`: the commented demo.
+- `requirements.txt`: pinned versions.
+- `test_demo.py`: a smoke test that checks the demo runs and produces its output.
+- `output/`: small results, such as a PNG plot or a table.
+- `BUILD_LOG.md`: what Claude tried, what failed, and how it was fixed.
+
+The README has fixed sections. They are a notice that the build is AI-generated and educational, what the package is and which problem it solves, the core ideas, where it fits against tools you know, install, a step-by-step walkthrough, the actual output, gotchas, limitations, how to adapt it, and the source paper, package link, and license.
+
+The top-level README of the public repo lists every build with its date, package, and license. It also says whether the demo ran.
+
+### When it runs
+
+By default, the build starts as soon as Codex finishes the digest. It runs alongside the podcast, and the daily email reports the result. A failed or skipped build never fails the daily run.
+
+In Settings you can instead run builds on their own schedule, at a time you choose. That build uses the latest finished digest of the day and skips if there is none.
+
+The build takes the highest-ranked digest item that has a code link, an OSI-approved license, and a demo that runs on a CPU in about 10 minutes. It skips packages it has already built. If no item qualifies, the day is recorded as skipped.
+
+### Safety model
+
+No personal information may leave your computer through a build. The rules are:
+
+- Nothing personal enters the sandbox. Claude receives only the selected item's public fields, the field profile that is already public in this repository, and the build instructions. The database, queue, connections, CV, settings, email details, and browser profiles stay out.
+- The sandbox starts with an empty environment. It has no host environment variables, git settings, SSH keys, or GitHub token. The only host folder it can write to is an empty output folder for that build.
+- The sandbox reaches only an allowlist of sites, such as PyPI, GitHub, Hugging Face, and the Anthropic API. Traffic goes through a proxy, and everything else is refused, including your local network. A malicious package therefore cannot probe your network or send data to an arbitrary server.
+- A second, fresh container installs the requirements and runs the smoke test. Your computer never runs code from a build.
+- Before any push, every file is scanned for API keys, your email addresses, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the push is blocked and the build stays local. The panel shows the reason.
+- Images are stripped of metadata. Only PNG and SVG outputs are allowed.
+- Commits use your GitHub noreply identity and UTC time, so they carry no personal name, email, or time zone.
+- A build whose demo did not run is still published. Its README and the index label it "did not run".
+
+The build uses a dedicated Anthropic API key. Unlike everything else, this key does live inside the sandbox, so a malicious package could read it. Create the key in the Anthropic Console with a low monthly spend limit, and use it for nothing else.
+
+### Set up daily builds
+
+1. Install WSL2. Run `wsl --install` in an administrator PowerShell, then restart the computer.
+2. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+3. Create a public GitHub repo, for example `daily-builds`.
+4. On the Setup tab, store the Anthropic API key. It goes to Windows Credential Manager, and the panel never shows it again.
+5. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`).
+6. On the Setup tab, press **Build image** in the checklist. This builds the sandbox image and the proxy once.
+
+The Daily builds tab then lists every build with its status, README, output, log, and a Retry button.
 
 ## Customizing the field
 
