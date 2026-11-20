@@ -4,7 +4,8 @@ Runs in the trusted publish job. Everything in the artifact is hostile: it is
 walked with lstat, size-capped, parsed as data only (never imported or run),
 sanitized, scanned with the vendored tools/scan.py, then copied and committed.
 
-The artifact root holds status.json and work/. Exit codes: 0 published, 2 blocked by the scan or a hostile artifact, 1 error.
+The artifact root holds status.json and work/. Exit codes: 0 published, 2 blocked by the scan, a hostile
+artifact or a token hit, 1 error (including output that could not be checked).
 Output carries fixed reasons and relative paths only, never matched text.
 """
 
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import html
 import json
 import os
 import re
@@ -44,7 +46,12 @@ UNSAFE_SVG_RE = re.compile(
     r"|href\s*=\s*[\"']?\s*(?:https?:)?//|url\(\s*[\"']?\s*(?:https?:)?//",
     re.IGNORECASE,
 )
+WHY = ("key", "unscannable")
 INDEX_HEADER = "| Date | Package | What it shows | Ran |\n| --- | --- | --- | --- |\n"
+
+
+class Unchecked(Exception):
+    """The build machine could not check its own output; nothing is published."""
 
 
 class Blocked(Exception):
@@ -117,17 +124,21 @@ def walk_artifact(src: Path) -> list[tuple[str, Path]]:
     return out
 
 
-def read_status(src: Path) -> tuple[bool, bool]:
-    """Return (ran, blocked) from status.json; missing or odd means did not run."""
+def read_status(src: Path) -> tuple[bool, bool, str]:
+    """Return (ran, blocked, why) from status.json; missing or odd means did not run.
+
+    why is "key" or "unscannable" when the tripwire blocked the output, else "".
+    """
     p = src / "status.json"
     try:
         st = os.lstat(p)
         if not stat.S_ISREG(st.st_mode) or st.st_size > 4096:
-            return False, False
+            return False, False, ""
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data.get("ran") is True, data.get("blocked") is True
+        why = data.get("why")
+        return data.get("ran") is True, data.get("blocked") is True, why if why in WHY else ""
     except (OSError, ValueError, AttributeError):
-        return False, False
+        return False, False, ""
 
 
 def _png_b64(value: object, rel: str) -> str:
@@ -139,6 +150,11 @@ def _png_b64(value: object, rel: str) -> str:
         return base64.b64encode(scan.sanitize_png(raw)).decode("ascii")
     except (binascii.Error, ValueError, zlib.error) as exc:
         raise Blocked("invalid image", rel) from exc
+
+
+def _unsafe_svg(text: str) -> bool:
+    """Active content, also when it is hidden behind character references."""
+    return bool(UNSAFE_SVG_RE.search(text) or UNSAFE_SVG_RE.search(html.unescape(text)))
 
 
 def _svg_text(value: object) -> str | None:
@@ -155,7 +171,7 @@ def _clean_mime_bundle(data: dict, rel: str, pngs: list[tuple[dict, str]]) -> No
             pngs.append((data, mime))
         elif mime == "image/svg+xml":
             svg = _svg_text(data[mime])
-            if svg is None or UNSAFE_SVG_RE.search(svg):
+            if svg is None or _unsafe_svg(svg):
                 del data[mime]
 
 
@@ -189,10 +205,13 @@ def process_notebook(raw: bytes, rel: str, ran: bool) -> tuple[bytes, bytes]:
             banner["id"] = "build-banner"
         cells.insert(0, banner)
     dump = {"indent": 1, "ensure_ascii": False}
-    real = (json.dumps(nb, **dump) + "\n").encode("utf-8")
-    for data, mime in pngs:
-        data[mime] = "data:image/png;base64," + data[mime]
-    return real, (json.dumps(nb, **dump) + "\n").encode("utf-8")
+    try:
+        real = (json.dumps(nb, **dump) + "\n").encode("utf-8")
+        for data, mime in pngs:
+            data[mime] = "data:image/png;base64," + data[mime]
+        return real, (json.dumps(nb, **dump) + "\n").encode("utf-8")
+    except UnicodeEncodeError as exc:  # a lone surrogate cannot be written as UTF-8
+        raise Blocked("invalid notebook", rel) from exc
 
 
 def stage(files: list[tuple[str, Path]], ran: bool, stage_dir: Path) -> dict[str, bytes]:
@@ -211,7 +230,7 @@ def stage(files: list[tuple[str, Path]], ran: bool, stage_dir: Path) -> dict[str
                 raise Blocked("invalid image", _shown(rel)) from exc
             real[rel] = scan_raw = raw
         elif ext == ".svg":
-            if UNSAFE_SVG_RE.search(raw.decode("utf-8", errors="replace")):
+            if _unsafe_svg(raw.decode("utf-8", errors="replace")):
                 raise Blocked("active svg", _shown(rel))
         dest = stage_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -283,9 +302,11 @@ def commit(repo: Path, folder: str) -> None:
 def publish(folder: str, src: Path, repo: Path) -> None:
     if not FOLDER_RE.fullmatch(folder):
         raise Blocked("bad folder name")
-    ran, blocked = read_status(src)
+    ran, blocked, why = read_status(src)
     if blocked:
-        raise Blocked("build output contained the API key")
+        if why == "unscannable":
+            raise Unchecked
+        raise Blocked("build output contained the subscription token")
     files = walk_artifact(src / "work")
     if not files:
         raise Blocked("empty artifact")
@@ -328,6 +349,9 @@ def main(argv: list[str] | None = None) -> int:
     except Blocked as b:
         print(f"blocked: {b.reason}" + (f" ({b.path})" if b.path != "." else ""))
         return 2
+    except Unchecked:
+        print("error: build output could not be checked")
+        return 1
     except FileExistsError:
         print("error: build folder already exists")
         return 1

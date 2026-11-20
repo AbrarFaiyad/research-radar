@@ -1,9 +1,9 @@
-"""Set up the daily-builds repo (workflow, publish tool, vendored scan) and store its API key.
+"""Set up the daily-builds repo (workflow, publish tool, vendored scan) and store its token secret.
 
 The one commit made here is the owner's, with the owner's configured GitHub noreply identity.
 Every git call runs in a temporary clone with hooks, filters, signing and user config switched
 off and with an allowlisted environment. Messages raised in ActionsError are fixed phrases:
-never git or gh output, paths, or the key.
+never git or gh output, paths, or the token.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 GIT_TIMEOUT_S = 300
 NOREPLY_SUFFIX = "@users.noreply.github.com"
-SECRET_NAME = "ANTHROPIC_API_KEY"
+SECRET_NAME = actions.SECRET_NAME
 KEY_MIN = 20
 SCOPE_MSG = "gh needs the workflow scope: run gh auth refresh -s workflow"
 TEMPLATE = Path(__file__).parent / "template"
@@ -37,6 +37,9 @@ MANAGED = (
     (".github/workflows/build.yml", TEMPLATE / "build.yml"),
     ("tools/publish_build.py", TEMPLATE / "publish_build.py"),
     ("tools/scan.py", SCAN_SRC),
+    ("tools/phases/plan.md", TEMPLATE / "tools" / "phases" / "plan.md"),
+    ("tools/phases/implement.md", TEMPLATE / "tools" / "phases" / "implement.md"),
+    ("tools/phases/review.md", TEMPLATE / "tools" / "phases" / "review.md"),
 )
 README = ("README.md", TEMPLATE / "README.md")  # written only when the repo has none
 
@@ -242,11 +245,11 @@ def init_repo(
 
 
 def set_secret(cfg: Config, key: str, gh: actions.GhFn = actions.gh) -> None:
-    """Store the API key as the repo secret. The key goes to gh on stdin only."""
+    """Store the Claude subscription token as the repo secret. It goes to gh on stdin only."""
     if not cfg.builds.repo.strip():
         raise ActionsError("no target repo")
     if len(key) < KEY_MIN or re.search(r"\s", key):
-        raise ActionsError("that does not look like an API key")
+        raise ActionsError("that does not look like a Claude subscription token")
     try:
         proc = gh(["secret", "set", SECRET_NAME, "-R", cfg.builds.repo], input=key)
     except (OSError, subprocess.TimeoutExpired):

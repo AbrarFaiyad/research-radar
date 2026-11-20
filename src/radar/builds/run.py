@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from radar.builds import actions as actions_module
+from radar.builds import scan
 from radar.builds.actions import ActionsError
 from radar.builds.select import History, HistoryCorrupt, folder_name, pick
 
@@ -27,9 +28,12 @@ GIT_ENV_ALLOW = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "
 GIT_TIMEOUT_S = 30
 NOT_COMMITTED = "field profile not committed"
 UNCOMMITTED = "field profile has uncommitted changes"
+GONE = actions_module.GONE
 STILL_RUNNING = "a build is still running"
 NOT_FOUND = "workflow started but run not found"
-UNREADABLE = "could not read the workflow run"
+UNREADABLE = actions_module.UNREADABLE
+PROMPT_MAX_CHARS = 60_000
+PROMPT_BLOCKING = ("personal information", "local path", "secret pattern")
 TEMPLATE_RE = re.compile(r"\{\{(DAY|FIELD_PROFILE|ITEM_JSON)\}\}")
 
 
@@ -77,6 +81,17 @@ def _committed_profile(root: Path) -> tuple[str | None, str]:
     if committed != working:
         return None, UNCOMMITTED
     return committed, ""
+
+
+def _prompt_leaks(cfg, prompt: str) -> bool:
+    """True when the outgoing prompt carries personal markers, local paths or key patterns.
+
+    High-entropy findings are ignored: public item text legitimately holds hashes and URLs.
+    """
+    findings = scan.scan_bytes("prompt", prompt.encode("utf-8"), scan.personal_markers(cfg))
+    return any(
+        f.reason.startswith(PROMPT_BLOCKING) and "(high-entropy" not in f.reason for f in findings
+    )
 
 
 def _status_of(path: Path) -> str | None:
@@ -156,6 +171,7 @@ def run_build(
     actions=actions_module,
     today: dt.date | None = None,
     log: Callable = print,
+    retry: bool = False,
 ) -> BuildRecord:
     start = time.monotonic()
     day = (today or dt.date.today()).isoformat()
@@ -189,7 +205,7 @@ def run_build(
     try:
         if history.published_on(day):
             return finish("skipped", "already published today")
-        if _status_of(cfg.builds_dir / "records" / f"{day}.json") == "building":
+        if not retry and _status_of(cfg.builds_dir / "records" / f"{day}.json") == "building":
             return finish("skipped", STILL_RUNNING)
         cand, reason = pick(result, history.built())
     except HistoryCorrupt:
@@ -203,6 +219,15 @@ def run_build(
         prompt = render_prompt(template, day, cand.item, profile)
     except OSError:
         return finish("failed", "could not prepare the build prompt")
+    if len(prompt) > PROMPT_MAX_CHARS:
+        return finish("skipped", "build prompt too long")
+    if _prompt_leaks(cfg, prompt):
+        return finish("skipped", "build prompt contains personal information")
+    names = actions.secret_names(b.repo)
+    if names is None:
+        return finish("skipped", "could not check the repo secrets")
+    if actions_module.SECRET_NAME not in names:
+        return finish("skipped", "subscription token secret not set in the repo")
 
     since = dt.datetime.now(dt.UTC)
     try:
@@ -235,6 +260,8 @@ def run_build(
     try:
         state = actions.wait_run(cfg, run_id, b.poll_min * 60)
     except ActionsError as exc:
+        if str(exc) == actions_module.GONE:
+            return finish("failed", GONE)
         return finish("building", str(exc))
     if state == "building":
         return finish("building")
@@ -273,9 +300,11 @@ def sync_builds(cfg, actions=actions_module, log: Callable = print) -> list[Buil
             status, reason = actions.outcome(cfg, rec.run_id, rec.folder)
             if reason == UNREADABLE:
                 continue  # keep it building; the next sync tries again
-        except ActionsError:
-            log(f"builds: could not check the run for {rec.day}")
-            continue
+        except ActionsError as exc:
+            if str(exc) != GONE:
+                log(f"builds: could not check the run for {rec.day}")
+                continue
+            status, reason = "failed", GONE
         final = BuildRecord(
             day=rec.day,
             status=status,

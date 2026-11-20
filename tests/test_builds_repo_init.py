@@ -11,7 +11,7 @@ from radar.builds.repo_init import init_repo, run_git, set_secret
 NAME = "Fake Owner"
 EMAIL = "1234+fakeowner@users.noreply.github.com"
 TEMPLATE = Path(scan.__file__).parent / "template"
-KEY = "sk-ant-api03-" + "q" * 40
+KEY = "sk-ant-oat01-" + "q" * 40
 SCOPES = "'gist', 'read:org', 'repo', 'workflow'"
 
 
@@ -91,17 +91,25 @@ def rejecting_hook(origin):
     return hook
 
 
-def test_init_writes_the_four_files_and_returns_the_url(icfg, origin):
+def test_init_writes_the_managed_files_and_returns_the_url(icfg, origin):
     assert go(icfg) == "https://github.com/owner/daily"
     assert files(origin) == [
         ".github/workflows/build.yml",
         "README.md",
+        "tools/phases/implement.md",
+        "tools/phases/plan.md",
+        "tools/phases/review.md",
         "tools/publish_build.py",
         "tools/scan.py",
     ]
     assert show(origin, ".github/workflows/build.yml") == (TEMPLATE / "build.yml").read_bytes()
     assert show(origin, "tools/publish_build.py") == (TEMPLATE / "publish_build.py").read_bytes()
     assert show(origin, "README.md") == (TEMPLATE / "README.md").read_bytes()
+    for name in ("plan", "implement", "review"):
+        assert (
+            show(origin, f"tools/phases/{name}.md")
+            == (TEMPLATE / "tools" / "phases" / f"{name}.md").read_bytes()
+        )
     assert sh("log", "--format=%s", "main", cwd=origin).splitlines() == ["Set up daily builds"]
 
 
@@ -269,7 +277,7 @@ def test_secret_key_goes_on_stdin_only(icfg):
     gh = FakeGh()
     set_secret(icfg, KEY, gh=gh)
     args, stdin = gh.calls[0]
-    assert args == ["secret", "set", "ANTHROPIC_API_KEY", "-R", "owner/daily"]
+    assert args == ["secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", "-R", "owner/daily"]
     assert stdin == KEY
     assert not any(KEY in a for a in args)
 
@@ -277,7 +285,7 @@ def test_secret_key_goes_on_stdin_only(icfg):
 @pytest.mark.parametrize("key", ["short", "x" * 19, "sk-ant " + "x" * 30, "x" * 30 + "\n", ""])
 def test_secret_rejects_bad_keys_without_calling_gh(icfg, key):
     gh = FakeGh()
-    with pytest.raises(ActionsError, match="does not look like an API key") as err:
+    with pytest.raises(ActionsError, match="does not look like a Claude subscription token") as err:
         set_secret(icfg, key, gh=gh)
     assert gh.calls == [] and (not key or key not in str(err.value))
 

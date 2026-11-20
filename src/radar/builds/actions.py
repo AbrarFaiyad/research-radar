@@ -13,6 +13,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,13 @@ RETRIES = 4
 RETRY_WAIT_S = 5
 CLOCK_SKEW_S = 60
 RESULT_STATUSES = ("published", "did_not_run")
+SECRET_NAME = "CLAUDE_CODE_OAUTH_TOKEN"
+GONE = "workflow run no longer exists"
+UNREADABLE = "could not read the workflow run"
+GONE_RE = re.compile(r"\b404\b|not found", re.IGNORECASE)
+# Step names of the publish job in template/build.yml, read to tell the failures apart.
+NO_OUTPUT_STEPS = ("Download artifact", "Check artifact")
+SCAN_BLOCK_STEP = "Leak scan blocked the build"
 ENV_ALLOW = (
     "PATH",
     "SYSTEMROOT",
@@ -113,6 +121,14 @@ def _json(gh_fn: GhFn, args: list[str]) -> Any:
         return None
 
 
+def secret_names(repo: str, gh_fn: GhFn | None = None) -> set[str] | None:
+    """Names of the repo's Actions secrets, or None when they could not be listed."""
+    data = _json(gh_fn or gh, ["secret", "list", "-R", repo, "--json", "name"])
+    if not isinstance(data, list):
+        return None
+    return {str(x.get("name")) for x in data if isinstance(x, dict)}
+
+
 def dispatch(cfg: Config, folder: str, prompt: str, gh: GhFn = gh) -> None:
     fail = ActionsError("could not start the workflow")
     path: str | None = None
@@ -193,6 +209,22 @@ def find_run(
     raise ActionsError("could not find the workflow run")
 
 
+def _view(gh_fn: GhFn, args: list[str]) -> Any:
+    """Like _json, but a run that GitHub no longer has raises GONE."""
+    try:
+        proc = gh_fn(args)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        if GONE_RE.search(proc.stderr or ""):
+            raise ActionsError(GONE)
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        return None
+
+
 def wait_run(
     cfg: Config,
     run_id: int,
@@ -205,7 +237,7 @@ def wait_run(
     start = clock()
     reached = False
     while True:
-        data = _json(gh, args)
+        data = _view(gh, args)
         if isinstance(data, dict):
             reached = True
             if data.get("status") == "completed":
@@ -231,22 +263,34 @@ def _retry_json(
 
 def _read_result(
     cfg: Config, folder: str, run_id: int, gh_fn: GhFn, sleep: Callable[[float], None]
-) -> str | None:
+) -> tuple[str | None, bool]:
+    """(status, retry). retry is True when the file could not be fetched at all."""
     path = f"repos/{cfg.builds.repo}/contents/{folder}/build-result.json"
     data = _retry_json(gh_fn, ["api", path], sleep)
     if not isinstance(data, dict) or not isinstance(data.get("content"), str):
-        return None
+        return None, True
     try:
         result = json.loads(base64.b64decode(data["content"], validate=False).decode("utf-8"))
     except (ValueError, binascii.Error):
-        return None
+        return None, False
     if not isinstance(result, dict) or result.get("folder") != folder:
-        return None
+        return None, False
     got = result.get("run_id")
     if isinstance(got, bool) or got != run_id:
-        return None
+        return None, False
     status = result.get("status")
-    return status if status in RESULT_STATUSES else None
+    return (status if status in RESULT_STATUSES else None), False
+
+
+def _publish_failure(job: dict) -> tuple[str, str]:
+    steps = {
+        s.get("name"): s.get("conclusion") for s in job.get("steps") or [] if isinstance(s, dict)
+    }
+    if any(steps.get(name) == "failure" for name in NO_OUTPUT_STEPS):
+        return "failed", "build produced no output"
+    if steps.get("Scan and commit") != "failure" and steps.get(SCAN_BLOCK_STEP) == "failure":
+        return "blocked", "leak scan blocked the build"
+    return "failed", "publish step failed"
 
 
 def outcome(
@@ -256,27 +300,33 @@ def outcome(
     gh: GhFn = gh,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, str]:
-    """Map a finished run to (status, reason). Reasons are fixed phrases."""
+    """Map a finished run to (status, reason). Reasons are fixed phrases.
+
+    ("building", UNREADABLE) means the run is done but its result cannot be read yet: keep the
+    record and ask again later.
+    """
     data = _retry_json(
         gh,
         ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion,jobs"],
         sleep,
     )
     if not isinstance(data, dict):
-        return "failed", "could not read the workflow run"
-    jobs = {
-        j.get("name"): j.get("conclusion") for j in data.get("jobs") or [] if isinstance(j, dict)
-    }
-    build, publish = jobs.get("build"), jobs.get("publish")
+        return "failed", UNREADABLE
+    jobs = {j.get("name"): j for j in data.get("jobs") or [] if isinstance(j, dict)}
+    build = (jobs.get("build") or {}).get("conclusion")
+    publish_job = jobs.get("publish") or {}
+    publish = publish_job.get("conclusion")
     if publish == "success":
-        status = _read_result(cfg, folder, run_id, gh, sleep)
+        status, retry = _read_result(cfg, folder, run_id, gh, sleep)
         if status is None:
+            if retry:
+                return "building", UNREADABLE
             return "failed", "unexpected build result"
         return status, "build did not run" if status == "did_not_run" else ""
     if "cancelled" in (data.get("conclusion"), build, publish):
         return "failed", "workflow cancelled"
     if publish not in (None, "skipped"):
-        return "blocked", "leak scan blocked the build"
+        return _publish_failure(publish_job)
     if build not in (None, "success"):
         return "failed", "build job failed"
     return "failed", "unexpected build result"

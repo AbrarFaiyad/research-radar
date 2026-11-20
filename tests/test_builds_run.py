@@ -27,10 +27,16 @@ class FakeActions:
         dispatch_exc=None,
         find_exc=None,
         wait_exc=None,
+        secrets=frozenset({actions_module.SECRET_NAME}),
     ):
         self.state, self.result, self.run_id = state, outcome, run_id
         self.dispatch_exc, self.find_exc, self.wait_exc = dispatch_exc, find_exc, wait_exc
+        self.secrets = secrets
         self.calls = []
+
+    def secret_names(self, repo):
+        self.calls.append(("secret_names", repo))
+        return None if self.secrets is None else set(self.secrets)
 
     def dispatch(self, cfg, folder, prompt):
         self.calls.append(("dispatch", folder, prompt))
@@ -149,7 +155,7 @@ def test_only_the_prompt_and_folder_are_sent(on_cfg, digest, result, monkeypatch
     monkeypatch.setenv("RADAR_PRIVATE_MARKERS", "zed-private-marker")
     fake = FakeActions()
     rec = go(on_cfg, digest, result, actions=fake)
-    _, folder, prompt = fake.calls[0]
+    _, folder, prompt = fake.calls[1]
     assert folder == rec.folder and folder.startswith("2026-11-21_mace_")
     assert "MACE LoRA finetune" in prompt and "COMMITTED-PROFILE-LINE" in prompt
     for word in ("zed-private-marker", "owner@fakemail", "relevance", "post_ids", "rejected"):
@@ -163,8 +169,8 @@ def test_published(on_cfg, digest, result):
     rec = go(on_cfg, digest, result, actions=fake)
     assert rec.status == "published" and rec.url == URL_PREFIX + rec.folder
     assert rec.package == "mace" and rec.run_id == 77
-    assert fake.names() == ["dispatch", "find_run", "wait_run", "outcome"]
-    assert fake.calls[2] == ("wait_run", 77, on_cfg.builds.poll_min * 60)
+    assert fake.names() == ["secret_names", "dispatch", "find_run", "wait_run", "outcome"]
+    assert fake.calls[3] == ("wait_run", 77, on_cfg.builds.poll_min * 60)
     assert history(on_cfg)["published"] == [
         {"package": "mace", "folder": rec.folder, "url": rec.url}
     ]
@@ -311,8 +317,8 @@ def test_field_profile_comes_from_committed_file(on_cfg, digest, result, tmp_pat
     on_cfg.field_profile = other
     fake = FakeActions()
     go(on_cfg, digest, result, actions=fake)
-    assert "PRIVATE-PROFILE-TEXT" not in fake.calls[0][2]
-    assert "COMMITTED-PROFILE-LINE" in fake.calls[0][2]
+    assert "PRIVATE-PROFILE-TEXT" not in fake.calls[1][2]
+    assert "COMMITTED-PROFILE-LINE" in fake.calls[1][2]
 
 
 def test_committed_profile_reaches_prompt_even_with_crlf_checkout(on_cfg, digest, result):
@@ -320,7 +326,7 @@ def test_committed_profile_reaches_prompt_even_with_crlf_checkout(on_cfg, digest
     profile.write_bytes(PROFILE.replace("\n", "\r\n").encode("utf-8"))
     fake = FakeActions()
     assert go(on_cfg, digest, result, actions=fake).status == "published"
-    assert "COMMITTED-PROFILE-LINE" in fake.calls[0][2]
+    assert "COMMITTED-PROFILE-LINE" in fake.calls[1][2]
 
 
 def test_uncommitted_profile_skips_build(on_cfg, digest, result):
@@ -475,3 +481,97 @@ def test_building_record_is_written_for_a_string_digest_folder(on_cfg, digest, r
     rec = go(on_cfg, str(digest), result, actions=FakeActions(state="building"))
     assert rec.status == "building"
     assert json.loads((digest / "build.json").read_text("utf-8"))["status"] == "building"
+
+
+# ---- preflight and outgoing prompt guards ------------------------------------------------------
+def commit_profile(root, text):
+    (root / "config" / "field_profile.md").write_bytes(text.encode("utf-8"))
+    git("add", "config/field_profile.md", cwd=root)
+    git("-c", "user.name=t", "-c", "user.email=t@x.y", "commit", "-q", "-m", "p2", cwd=root)
+
+
+def test_missing_token_secret_skips_before_dispatch(on_cfg, digest, result):
+    fake = FakeActions(secrets={"OTHER"})
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("skipped", "subscription token secret not set in the repo")
+    assert fake.names() == ["secret_names"] and fake.calls[0][1] == "owner/daily"
+    assert history(on_cfg) == {"published": [], "attempts": []}
+
+
+def test_unreadable_secret_list_skips_before_dispatch(on_cfg, digest, result):
+    fake = FakeActions(secrets=None)
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("skipped", "could not check the repo secrets")
+    assert "dispatch" not in fake.names()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Contact zed-private-marker for details",
+        "see C:" + chr(92) + "Users" + chr(92) + "someone" + chr(92) + "notes",
+        "token sk-ant-api03-" + "Zq9k3Lm2Xy7" * 4,
+    ],
+    ids=["marker", "local-path", "key"],
+)
+def test_prompt_with_personal_information_is_not_sent(on_cfg, digest, result, monkeypatch, text):
+    monkeypatch.setenv("RADAR_PRIVATE_MARKERS", "zed-private-marker")
+    commit_profile(on_cfg.root, PROFILE + text + "\n")
+    fake = FakeActions()
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("skipped", "build prompt contains personal information")
+    assert fake.calls == []
+    assert text not in json.dumps(records(on_cfg))
+
+
+def test_high_entropy_text_in_the_prompt_is_not_a_leak(on_cfg, digest, result):
+    blob = "aZ3kQ9xLm2Vb7NpR4tYu8WcEd5HgJf1S"
+    commit_profile(on_cfg.root, PROFILE + "hash " + blob + "\n")
+    fake = FakeActions()
+    assert go(on_cfg, digest, result, actions=fake).status == "published"
+    assert blob in fake.calls[1][2]
+
+
+def test_overlong_prompt_is_not_sent(on_cfg, digest, result):
+    commit_profile(on_cfg.root, PROFILE + "word " * 13000)
+    fake = FakeActions()
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("skipped", "build prompt too long")
+    assert fake.calls == []
+
+
+# ---- retry and vanished runs -------------------------------------------------------------------
+def test_retry_redispatches_over_a_building_record(on_cfg, digest, result):
+    go(on_cfg, digest, result, actions=FakeActions(state="building", run_id=77))
+    fake = FakeActions(run_id=88)
+    assert go(on_cfg, digest, result, actions=fake).reason == "a build is still running"
+    rec = go(on_cfg, digest, result, actions=fake, retry=True)
+    assert rec.status == "published" and rec.run_id == 88
+    assert "dispatch" in fake.names()
+    assert records(on_cfg)["run_id"] == 88
+
+
+def test_sync_marks_a_vanished_run_failed(on_cfg, result):
+    digest = on_cfg.digests_dir / "2026-11-21"
+    digest.mkdir(parents=True)
+    start_building(on_cfg, digest, result)
+    fake = FakeActions(wait_exc=ActionsError("workflow run no longer exists"))
+    done = sync_builds(on_cfg, actions=fake, log=lambda *_: None)
+    assert [(r.status, r.reason) for r in done] == [("failed", "workflow run no longer exists")]
+    assert records(on_cfg)["status"] == "failed"
+    assert json.loads((digest / "build.json").read_text("utf-8"))["status"] == "failed"
+    assert history(on_cfg)["attempts"][0]["status"] == "failed"
+
+
+def test_a_run_that_vanishes_while_waiting_is_failed(on_cfg, digest, result):
+    fake = FakeActions(wait_exc=ActionsError("workflow run no longer exists"))
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert (rec.status, rec.reason) == ("failed", "workflow run no longer exists")
+
+
+def test_a_finished_run_with_an_unreadable_result_stays_building(on_cfg, digest, result):
+    fake = FakeActions(outcome=("building", "could not read the workflow run"))
+    rec = go(on_cfg, digest, result, actions=fake)
+    assert rec.status == "building" and rec.run_id == 77
+    done = sync_builds(on_cfg, actions=fake, log=lambda *_: None)
+    assert done == [] and records(on_cfg)["status"] == "building"

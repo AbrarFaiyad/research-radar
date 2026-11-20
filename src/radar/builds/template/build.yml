@@ -27,18 +27,37 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4.9.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
+      # Only the fixed phase instructions are fetched, without a stored token. They are copied
+      # out and the checkout is removed before any model-written code can run.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: tools/phases
+          persist-credentials: false
+      - name: Keep the phase instructions
+        run: |
+          mkdir -p /tmp/phases
+          cp tools/phases/plan.md tools/phases/implement.md tools/phases/review.md /tmp/phases/
+          find "$GITHUB_WORKSPACE" -mindepth 1 -delete
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.329
       - name: Drop passwordless sudo
         run: |
           sudo systemctl stop docker.socket docker.service || true
           sudo rm -f /etc/sudoers.d/runner
+          if sudo -n true >/dev/null 2>&1; then
+            echo "passwordless sudo is still available" >&2
+            exit 1
+          fi
+          if docker info >/dev/null 2>&1; then
+            echo "docker is still reachable" >&2
+            exit 1
+          fi
       - name: Validate folder name
         env:
           FOLDER: ${{ inputs.folder }}
@@ -50,30 +69,60 @@ jobs:
       - name: Write prompt
         run: |
           python3 -c 'import json,os,sys;sys.stdout.write(json.load(open(os.environ["GITHUB_EVENT_PATH"]))["inputs"]["prompt"])' > /tmp/prompt.txt
-      - name: Build with Claude
-        timeout-minutes: 35
+      # Three Claude passes on the repo owner's Claude subscription. Each has its own token
+      # scope, a failed pass never stops the next step, and its output goes to a log that is
+      # not uploaded. The model aliases follow the latest Sonnet and Haiku.
+      - name: Plan with Claude
+        timeout-minutes: 10
         continue-on-error: true
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           HOME: /tmp/build-home
         run: |
           mkdir -p /tmp/build-home /tmp/out/work
           cd /tmp/out/work
           rc=0
-          claude -p --model sonnet --max-turns 60 --permission-mode bypassPermissions < /tmp/prompt.txt > /tmp/claude.log 2>&1 || rc=$?
+          cat /tmp/prompt.txt /tmp/phases/plan.md | claude -p --model sonnet --max-turns 20 --permission-mode bypassPermissions > /tmp/claude-plan.log 2>&1 || rc=$?
+          echo "claude exit code: $rc"
+          exit "$rc"
+      - name: Implement with Claude
+        timeout-minutes: 25
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HOME: /tmp/build-home
+        run: |
+          mkdir -p /tmp/build-home /tmp/out/work
+          cd /tmp/out/work
+          rc=0
+          cat /tmp/prompt.txt /tmp/phases/implement.md | claude -p --model haiku --max-turns 60 --permission-mode bypassPermissions > /tmp/claude-implement.log 2>&1 || rc=$?
+          echo "claude exit code: $rc"
+          exit "$rc"
+      - name: Review with Claude
+        timeout-minutes: 15
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          HOME: /tmp/build-home
+        run: |
+          mkdir -p /tmp/build-home /tmp/out/work
+          cd /tmp/out/work
+          rc=0
+          cat /tmp/prompt.txt /tmp/phases/review.md | claude -p --model sonnet --max-turns 30 --permission-mode bypassPermissions > /tmp/claude-review.log 2>&1 || rc=$?
           echo "claude exit code: $rc"
           exit "$rc"
       - name: Run the notebook
         timeout-minutes: 20
         env:
-          HOME: /tmp/build-home
+          HOME: /tmp/nb-home
         run: |
-          mkdir -p /tmp/build-home /tmp/out/work
+          rm -rf /tmp/build-home /tmp/claude*.log
+          mkdir -p /tmp/nb-home /tmp/out/work
           cd /tmp/out/work
           ran=false
           if [ -f requirements.txt ] && [ -f demo.ipynb ]; then
             if pip install papermill ipykernel && pip install -r requirements.txt \
-              && papermill demo.ipynb demo.ipynb --cwd . --execution-timeout 600; then
+              && papermill demo.ipynb demo.ipynb -k python3 --cwd . --execution-timeout 600; then
               ran=true
             fi
           fi
@@ -82,16 +131,17 @@ jobs:
         if: always()
         run: |
           mkdir -p /tmp/out/work
+          rm -f /tmp/out/work/PLAN.md
           find /tmp/out/work \( -name __pycache__ -o -name .ipynb_checkpoints -o -name .venv -o -name .git \) \
             -prune -exec rm -rf {} +
       # Known limit: a background process started during the build could still write
       # into work after this step runs. The publish job's scan, the 1-day retention
       # and the artifact deletion in the cleanup job are the remaining guards.
-      - name: Tripwire for the API key
+      - name: Tripwire for the subscription token
         id: tripwire
         if: always()
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           mkdir -p /tmp/out/work
           /usr/bin/python3 -I - <<'PY'
@@ -100,7 +150,7 @@ jobs:
           CAP = 5 * 1024 * 1024
           MAX_FILES = 2000
           out = "/tmp/out"
-          key = os.environ.get("ANTHROPIC_API_KEY", "").strip().encode()
+          key = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip().encode()
           forms = set()
           if len(key) >= 8:
               forms |= {key, key.hex().encode(), key.hex().upper().encode()}
@@ -112,25 +162,26 @@ jobs:
 
 
           def tripped():
+              """None when clean, "key" for a token hit, "unscannable" for anything odd."""
               if stat.S_ISLNK(os.lstat(out).st_mode):
-                  return True
+                  return "unscannable"
               count = 0
               for root, dirs, files in os.walk(out, followlinks=False, onerror=lambda e: 1 / 0):
                   for name in dirs + files:
                       mode = os.lstat(os.path.join(root, name)).st_mode
                       if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
-                          return True
+                          return "unscannable"
                   for name in files:
                       count += 1
                       path = os.path.join(root, name)
                       if count > MAX_FILES or os.lstat(path).st_size > CAP:
-                          return True
+                          return "unscannable"
                       with open(path, "rb") as fh:
                           data = fh.read(CAP + 1)
                       squashed = b"".join(data.split())
                       if any(f in data or f in squashed for f in forms):
-                          return True
-              return False
+                          return "key"
+              return None
 
 
           def wipe(path):
@@ -144,17 +195,17 @@ jobs:
 
 
           try:
-              hit = tripped()
+              why = tripped()
           except Exception:
-              hit = True
-          if hit:
+              why = "unscannable"
+          if why:
               os.chmod(out, 0o700)
               for name in os.listdir(out):
                   wipe(os.path.join(out, name))
               os.makedirs(os.path.join(out, "work"))
               with open(os.path.join(out, "status.json"), "w") as fh:
-                  json.dump({"ran": False, "blocked": True}, fh)
-          print("tripwire:", "hit" if hit else "clean")
+                  json.dump({"ran": False, "blocked": True, "why": why}, fh)
+          print("tripwire:", "hit" if why else "clean")
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && steps.tripwire.outcome == 'success'
@@ -170,20 +221,45 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    # Step names are read by Research Radar to tell a missing artifact, a failed publish and
+    # a leak-scan block apart. Keep them in step with radar.builds.actions.
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4.9.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Download artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: build
           path: ${{ runner.temp }}/artifact
+      - name: Check artifact
+        run: |
+          art="$RUNNER_TEMP/artifact"
+          if [ -d "$art/work" ] && [ -n "$(ls -A "$art/work")" ]; then
+            exit 0
+          fi
+          if [ -f "$art/status.json" ] && grep -q '"blocked": true' "$art/status.json"; then
+            exit 0
+          fi
+          echo "the build produced no output" >&2
+          exit 1
       - name: Scan and commit
+        id: scan
         env:
           FOLDER: ${{ inputs.folder }}
-        run: python tools/publish_build.py --folder "$FOLDER" --src "$RUNNER_TEMP/artifact"
+        run: |
+          rc=0
+          python tools/publish_build.py --folder "$FOLDER" --src "$RUNNER_TEMP/artifact" || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+            exit 1
+          fi
+      - name: Leak scan blocked the build
+        if: steps.scan.outputs.rc == '2'
+        run: exit 1
       - name: Push
+        if: steps.scan.outputs.rc == '0'
         run: git push
 
   cleanup:

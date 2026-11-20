@@ -176,12 +176,13 @@ def test_wait_run_tolerates_gh_errors():
 # outcome
 
 
-def view(run_conclusion, build, publish):
+def view(run_conclusion, build, publish, publish_steps=()):
     jobs = []
     if build is not None:
         jobs.append({"name": "build", "conclusion": build, "steps": []})
     if publish is not None:
-        jobs.append({"name": "publish", "conclusion": publish, "steps": []})
+        steps = [{"name": n, "conclusion": c} for n, c in publish_steps]
+        jobs.append({"name": "publish", "conclusion": publish, "steps": steps})
     return done(json.dumps({"status": "completed", "conclusion": run_conclusion, "jobs": jobs}))
 
 
@@ -230,12 +231,15 @@ def test_outcome_bad_result_file(payload):
     )
 
 
-def test_outcome_result_fetch_error():
+def test_outcome_unfetchable_result_stays_building_for_the_next_sync():
     gh = FakeGh(view("success", "success", "success"), done("", code=1))
     assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
-        "failed",
-        "unexpected build result",
+        "building",
+        "could not read the workflow run",
     )
+
+
+def test_outcome_garbled_result_is_failed():
     gh = FakeGh(view("success", "success", "success"), done(json.dumps({"content": "!!!"})))
     assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
         "failed",
@@ -243,12 +247,38 @@ def test_outcome_result_fetch_error():
     )
 
 
-def test_outcome_publish_failure_is_blocked():
-    gh = FakeGh(view("failure", "success", "failure"))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
-        "blocked",
-        "leak scan blocked the build",
-    )
+OK, BAD, SKIP = "success", "failure", "skipped"
+
+
+def publish_steps(download=OK, check=OK, scan=OK, block=SKIP, push=SKIP):
+    return [
+        ("Set up job", OK),
+        ("Download artifact", download),
+        ("Check artifact", check),
+        ("Scan and commit", scan),
+        ("Leak scan blocked the build", block),
+        ("Push", push),
+    ]
+
+
+@pytest.mark.parametrize(
+    "steps,expected",
+    [
+        (
+            publish_steps(download=BAD, check=SKIP, scan=SKIP),
+            ("failed", "build produced no output"),
+        ),
+        (publish_steps(check=BAD, scan=SKIP), ("failed", "build produced no output")),
+        (publish_steps(scan=BAD, push=SKIP), ("failed", "publish step failed")),
+        (publish_steps(block=BAD), ("blocked", "leak scan blocked the build")),
+        (publish_steps(push=BAD), ("failed", "publish step failed")),
+        ([], ("failed", "publish step failed")),
+    ],
+    ids=["no-artifact", "empty-work", "publish-error", "scan-block", "push-error", "no-steps"],
+)
+def test_outcome_publish_failures_are_told_apart(steps, expected):
+    gh = FakeGh(view("failure", "success", "failure", steps))
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == expected
 
 
 @pytest.mark.parametrize("build,publish", [("failure", "skipped"), ("failure", None)])
@@ -291,10 +321,10 @@ def test_url():
 def test_gh_env_is_allowlisted(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "tok")
     monkeypatch.setenv("GITHUB_TOKEN", "tok2")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "key")
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     env = actions.gh_env()
-    for bad in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"):
+    for bad in ("GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         assert bad not in env
     assert env["GH_PROMPT_DISABLED"] == "1"
     assert env["GH_NO_UPDATE_NOTIFIER"] == "1"
@@ -370,6 +400,23 @@ def test_find_run_falls_back_to_newest_in_skew():
         )
     )
     assert actions.find_run(CFG, FOLDER, SINCE, gh=gh, sleep=NOSLEEP) == 2
+
+
+@pytest.mark.parametrize("stderr", ["HTTP 404: Not Found (https://api.github.com/x)", "not found"])
+def test_wait_run_raises_when_the_run_is_gone(stderr):
+    gh = FakeGh(subprocess.CompletedProcess([], 1, stdout="", stderr=stderr))
+    with pytest.raises(ActionsError) as e:
+        actions.wait_run(CFG, 5, 100, gh=gh, sleep=NOSLEEP, clock=lambda: 0.0)
+    assert str(e.value) == "workflow run no longer exists"
+
+
+def test_secret_names_lists_names_and_fails_closed():
+    gh = FakeGh(done(json.dumps([{"name": "CLAUDE_CODE_OAUTH_TOKEN"}, {"name": "X"}])))
+    assert actions.secret_names(REPO, gh) == {"CLAUDE_CODE_OAUTH_TOKEN", "X"}
+    assert gh.calls[0] == ["secret", "list", "-R", REPO, "--json", "name"]
+    assert actions.secret_names(REPO, FakeGh(done("", code=1))) is None
+    assert actions.secret_names(REPO, FakeGh(done("{}"))) is None
+    assert actions.secret_names(REPO, FakeGh(OSError("no gh"))) is None
 
 
 def test_wait_run_never_reached_raises():
