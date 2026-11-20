@@ -31,14 +31,38 @@ CODEX_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["post_ids", "title", "kind", "authors", "venue", "primary_url",
-                             "sources", "what", "how", "why_it_matters", "relevance",
-                             "limitations", "impact", "confidence"],
+                "required": [
+                    "post_ids",
+                    "title",
+                    "kind",
+                    "authors",
+                    "venue",
+                    "primary_url",
+                    "sources",
+                    "what",
+                    "how",
+                    "why_it_matters",
+                    "relevance",
+                    "limitations",
+                    "impact",
+                    "confidence",
+                ],
                 "properties": {
                     "post_ids": {"type": "array", "items": {"type": "integer"}},
                     "title": _S,
-                    "kind": {"type": "string", "enum": ["paper", "preprint", "dataset", "model",
-                                                        "software", "news", "article", "other"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "paper",
+                            "preprint",
+                            "dataset",
+                            "model",
+                            "software",
+                            "news",
+                            "article",
+                            "other",
+                        ],
+                    },
                     "authors": _S,
                     "venue": _S,
                     "primary_url": _S,
@@ -95,8 +119,15 @@ def _post_view(row) -> dict:
     }
 
 
-def build_codex_task(rows, profile: str, template: str, min_items: int, max_items: int,
-                     today: dt.date | None = None) -> str:
+def build_codex_task(
+    rows,
+    profile: str,
+    template: str,
+    min_items: int,
+    max_items: int,
+    today: dt.date | None = None,
+    reader: str = "a researcher in the field described below",
+) -> str:
     blocks = []
     for r in rows:
         v = _post_view(r)
@@ -108,8 +139,13 @@ def build_codex_task(rows, profile: str, template: str, min_items: int, max_item
             f"- Post text:\n{v['text']}\n"
         )
     return template.format(
-        today=(today or dt.date.today()).isoformat(), profile=profile.strip(), n=len(rows),
-        min_items=min_items, max_items=max_items, items="\n".join(blocks),
+        today=(today or dt.date.today()).isoformat(),
+        profile=profile.strip(),
+        n=len(rows),
+        reader=reader.strip(),
+        min_items=min_items,
+        max_items=max_items,
+        items="\n".join(blocks),
     )
 
 
@@ -118,8 +154,19 @@ def codex_command(cfg: Config, folder: Path, schema_path: Path, out_path: Path) 
     cmd = [exe]
     if cfg.digest.web_search:
         cmd.append("--search")
-    cmd += ["exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral",
-            "-C", str(folder), "--output-schema", str(schema_path), "-o", str(out_path)]
+    cmd += [
+        "exec",
+        "-s",
+        "read-only",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "-C",
+        str(folder),
+        "--output-schema",
+        str(schema_path),
+        "-o",
+        str(out_path),
+    ]
     if cfg.digest.codex_model:
         cmd += ["-m", cfg.digest.codex_model]
     cmd.append("-")
@@ -127,23 +174,39 @@ def codex_command(cfg: Config, folder: Path, schema_path: Path, out_path: Path) 
 
 
 def run_codex(cmd: list[str], task: str, timeout_s: int = 3600) -> None:
-    proc = subprocess.run(cmd, input=task, text=True, encoding="utf-8", capture_output=True,
-                          timeout=timeout_s, check=False)
+    proc = subprocess.run(
+        cmd,
+        input=task,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=timeout_s,
+        check=False,
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"codex exited {proc.returncode}: {proc.stderr[-2000:]}")
 
 
 def render_markdown(result: dict, day: str, reviewed: int) -> str:
     items = result.get("items", [])
-    out = [f"# Research digest, {day}", "", f"**{result.get('headline', '').strip()}**", "",
-           result.get("overview", "").strip(), "",
-           f"*{len(items)} kept of {reviewed} candidate posts.*", ""]
+    out = [
+        f"# Research digest, {day}",
+        "",
+        f"**{result.get('headline', '').strip()}**",
+        "",
+        result.get("overview", "").strip(),
+        "",
+        f"*{len(items)} kept of {reviewed} candidate posts.*",
+        "",
+    ]
     for i, p in enumerate(items, start=1):
         src = f"<{p['primary_url']}>" if p["primary_url"].strip() else "Primary source not found."
         out += [
             f"## {i}. {p['title']}",
-            (f"*{p['authors']}* · {p['venue']} · {p['kind']} · impact: {p['impact']} · "
-             f"confidence: {p['confidence']}  "),
+            (
+                f"*{p['authors']}* · {p['venue']} · {p['kind']} · impact: {p['impact']} · "
+                f"confidence: {p['confidence']}  "
+            ),
             src,
             "",
             f"**What.** {p['what']}",
@@ -159,7 +222,10 @@ def render_markdown(result: dict, day: str, reviewed: int) -> str:
         ]
         extra = [s for s in p.get("sources", []) if s.get("url")]
         if extra:
-            out += ["**More sources.** " + " · ".join(f"[{s['title']}]({s['url']})" for s in extra), ""]
+            out += [
+                "**More sources.** " + " · ".join(f"[{s['title']}]({s['url']})" for s in extra),
+                "",
+            ]
     return "\n".join(out) + "\n"
 
 
@@ -177,11 +243,14 @@ def source_urls(result: dict, limit: int = 40) -> list[str]:
 AudioMaker = Callable[[Path, dict], Path | None]
 
 
-def run_digest(cfg: Config, store: Store,
-               runner: Callable[[list[str], str], None] = run_codex,
-               make_audio: AudioMaker | None = None,
-               log: Callable[[str], None] = print,
-               today: dt.date | None = None) -> DigestResult | None:
+def run_digest(
+    cfg: Config,
+    store: Store,
+    runner: Callable[[list[str], str], None] = run_codex,
+    make_audio: AudioMaker | None = None,
+    log: Callable[[str], None] = print,
+    today: dt.date | None = None,
+) -> DigestResult | None:
     today = today or dt.date.today()
     rows = store.saved_posts(undigested_only=True, since_days=cfg.digest.backlog_days)
     rows = rows[: cfg.digest.max_candidates]
@@ -192,8 +261,15 @@ def run_digest(cfg: Config, store: Store,
 
     folder = unique_folder(cfg.digests_dir, today.isoformat())
     template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
-    task = build_codex_task(rows, cfg.field_profile_text(), template,
-                            cfg.digest.min_items, cfg.digest.max_items, today=today)
+    task = build_codex_task(
+        rows,
+        cfg.field_profile_text(),
+        template,
+        cfg.digest.min_items,
+        cfg.digest.max_items,
+        today=today,
+        reader=cfg.profile.reader,
+    )
     (folder / "codex_task.md").write_text(task, encoding="utf-8")
     schema_path = folder / "codex_schema.json"
     schema_path.write_text(json.dumps(CODEX_SCHEMA, indent=1), encoding="utf-8")

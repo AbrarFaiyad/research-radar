@@ -65,7 +65,9 @@ class Store:
 
     # posts -------------------------------------------------------------
     def has_post(self, post: RawPost) -> bool:
-        row = self.conn.execute("SELECT 1 FROM posts WHERE text_hash = ?", (post.text_hash,)).fetchone()
+        row = self.conn.execute(
+            "SELECT 1 FROM posts WHERE text_hash = ?", (post.text_hash,)
+        ).fetchone()
         return row is not None
 
     def add_post(self, post: RawPost, verdict: Verdict, links: list[dict]) -> int | None:
@@ -77,9 +79,18 @@ class Store:
                 summary, reason, seen_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                post.key, post.text_hash, post.author_url, post.author, post.text,
-                json.dumps(links), verdict.tier, verdict.kind, json.dumps(verdict.topics),
-                verdict.summary, verdict.reason, now,
+                post.key,
+                post.text_hash,
+                post.author_url,
+                post.author,
+                post.text,
+                json.dumps(links),
+                verdict.tier,
+                verdict.kind,
+                json.dumps(verdict.topics),
+                verdict.summary,
+                verdict.reason,
+                now,
             ),
         )
         self.upsert_author(post, commit=False)
@@ -103,24 +114,40 @@ class Store:
                  last_seen = excluded.last_seen,
                  status = CASE WHEN excluded.degree = '1st' THEN 'connected'
                                ELSE authors.status END""",
-            (post.author_url, post.author, post.author_kind, post.headline, post.degree, now, now,
-             post.degree),
+            (
+                post.author_url,
+                post.author,
+                post.author_kind,
+                post.headline,
+                post.degree,
+                now,
+                now,
+                post.degree,
+            ),
         )
         if commit:
             self.conn.commit()
 
-    def update_verdict(self, post_id: int, verdict: Verdict, links: list[dict] | None = None) -> None:
+    def update_verdict(
+        self, post_id: int, verdict: Verdict, links: list[dict] | None = None
+    ) -> None:
         sets = "tier=?, kind=?, topics=?, summary=?, reason=?"
-        vals: list = [verdict.tier, verdict.kind, json.dumps(verdict.topics), verdict.summary,
-                      verdict.reason]
+        vals: list = [
+            verdict.tier,
+            verdict.kind,
+            json.dumps(verdict.topics),
+            verdict.summary,
+            verdict.reason,
+        ]
         if links is not None:
             sets += ", links=?"
             vals.append(json.dumps(links))
         self.conn.execute(f"UPDATE posts SET {sets} WHERE id=?", [*vals, post_id])
         self.conn.commit()
 
-    def saved_posts(self, undigested_only: bool = False,
-                    since_days: float | None = None) -> list[sqlite3.Row]:
+    def saved_posts(
+        self, undigested_only: bool = False, since_days: float | None = None
+    ) -> list[sqlite3.Row]:
         q = "SELECT * FROM posts WHERE tier IN ('core','adjacent')"
         params: list[str] = []
         if undigested_only:

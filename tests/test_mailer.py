@@ -14,14 +14,16 @@ CFG = EmailCfg(enabled=True, to="me@example.org")
 def _digest(tmp_path):
     d = tmp_path / "digests" / "2026-11-19"
     d.mkdir(parents=True)
-    (d / "summary.md").write_text("# Research digest\n\n**Headline**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
-                                  encoding="utf-8")
+    (d / "summary.md").write_text(
+        "# Research digest\n\n**Headline**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8"
+    )
     (d / "podcast_script.md").write_text("**A:** hi", encoding="utf-8")
     (d / "episode.mp3").write_bytes(b"ID3" + b"\0" * 100)
     q = tmp_path / "queue"
     q.mkdir()
-    (q / "connect_queue.md").write_text("# Connection queue\n\n| # | Name |\n|---|---|\n| 1 | X |\n",
-                                        encoding="utf-8")
+    (q / "connect_queue.md").write_text(
+        "# Connection queue\n\n| # | Name |\n|---|---|\n| 1 | X |\n", encoding="utf-8"
+    )
     (q / "connect_queue.csv").write_text("rank,name\n1,X\n", encoding="utf-8")
     return d, q
 
@@ -76,11 +78,18 @@ class FakeSMTP:
 
 
 def test_send_uses_tls_and_stored_password(monkeypatch, tmp_path):
-    monkeypatch.setattr(mailer, "get_password", lambda user: "app-pass" if user == "me@example.org" else None)
+    monkeypatch.setattr(
+        mailer, "get_password", lambda user: "app-pass" if user == "me@example.org" else None
+    )
     d, q = _digest(tmp_path)
     mailer.send(CFG, mailer.compose_daily(CFG, d, q), smtp_factory=FakeSMTP)
-    assert FakeSMTP.sent[-1] == ("smtp.gmail.com", 587, ("me@example.org", "app-pass"), True,
-                                 "me@example.org")
+    assert FakeSMTP.sent[-1] == (
+        "smtp.gmail.com",
+        587,
+        ("me@example.org", "app-pass"),
+        True,
+        "me@example.org",
+    )
 
 
 def test_send_without_password_explains_setup(monkeypatch, tmp_path):
@@ -103,8 +112,9 @@ def test_wav_to_mp3_shrinks_audio(tmp_path):
 
 def test_bitrate_choice_fits_budget():
     from radar.podcast import mp3_bitrate_for
-    assert mp3_bitrate_for(23 * 60) == 80          # 23-minute NotebookLM episode, 16 MiB budget
-    assert mp3_bitrate_for(60 * 60) == 32          # an hour still fits
+
+    assert mp3_bitrate_for(23 * 60) == 80  # 23-minute NotebookLM episode, 16 MiB budget
+    assert mp3_bitrate_for(60 * 60) == 32  # an hour still fits
     assert mp3_bitrate_for(23 * 60, budget_bytes=8 * 1024 * 1024) == 40
 
 
@@ -113,13 +123,16 @@ def test_oversize_m4a_is_reencoded_to_fit(tmp_path):
     import numpy as np
 
     from radar.podcast import duration_seconds, email_ready
+
     src = tmp_path / "episode.m4a"
     with av.open(str(src), "w") as out:
         st = out.add_stream("aac", rate=24000, layout="mono")
         t = np.arange(24000 * 20) / 24000
         samples = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
         for i in range(0, len(samples), 1024):
-            frame = av.AudioFrame.from_ndarray(samples[None, i:i + 1024], format="fltp", layout="mono")
+            frame = av.AudioFrame.from_ndarray(
+                samples[None, i : i + 1024], format="fltp", layout="mono"
+            )
             frame.rate = 24000
             for pkt in st.encode(frame):
                 out.mux(pkt)
@@ -129,4 +142,4 @@ def test_oversize_m4a_is_reencoded_to_fit(tmp_path):
     mp3 = email_ready(src, budget_bytes=small_budget)
     assert mp3.suffix == ".mp3" and mp3.stat().st_size <= small_budget
     assert abs(duration_seconds(mp3) - 20) < 1.5
-    assert email_ready(src, budget_bytes=10**9) == src   # fits: attached unchanged
+    assert email_ready(src, budget_bytes=10**9) == src  # fits: attached unchanged

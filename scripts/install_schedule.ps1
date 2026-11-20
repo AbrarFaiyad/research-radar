@@ -1,8 +1,8 @@
 # Registers a daily Windows scheduled task that runs scripts\run_daily.ps1.
-# Usage:   powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 08:30
+# Usage:   powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 07:00
 # Remove:  Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
 param(
-    [string]$Time = "08:30",
+    [string]$Time = "07:00",
     [string]$TaskName = "ResearchRadarDaily"
 )
 $ErrorActionPreference = "Stop"

@@ -1,8 +1,16 @@
 # Research Radar
 
-Keeping up with AI-for-materials research takes time, and a LinkedIn feed mixes research with posts that do not report scientific results. Research Radar gives a computational materials scientist a daily researched briefing and a list of researchers to connect with by hand, with the goal of making the feed more relevant.
+[![CI](https://github.com/AbrarFaiyad/research-radar/actions/workflows/ci.yml/badge.svg)](https://github.com/AbrarFaiyad/research-radar/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-Jump to: [Architecture](#architecture) · [Installation](#installation) · [Usage](#usage)
+Keeping up with new research takes time, and a LinkedIn feed mixes real results with announcements, ads, and personal news. Research Radar reads the feed for you each morning, keeps the work that matters to your field, finds the primary sources, and delivers a written digest and a two-host podcast to your inbox. It also lists the researchers behind that work, so you can connect with them and make your feed better over time.
+
+The repository ships configured for computational materials science. To use it for another field, edit one profile file and one line of settings.
+
+Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [Installation](#installation) · [Usage](#usage) · [Engineering](#engineering)
+
+![Control panel dashboard](docs/images/panel-dashboard.png)
 
 ## What it does
 
@@ -11,6 +19,8 @@ Jump to: [Architecture](#architecture) · [Installation](#installation) · [Usag
 - Sends every saved post to Codex, which keeps the 5 to 15 items with real impact, finds their primary sources and related coverage, and writes the digest.
 - Turns the digest into a NotebookLM Audio Overview, a two-host podcast.
 - Emails the digest, queue, and podcast to the owner each day.
+- Gives you a local control panel to run any step, change settings and the schedule, and work through the queue and past digests.
+- Checks its own setup with `radar doctor` and records every daily run, stage by stage.
 
 ## Architecture
 
@@ -18,7 +28,7 @@ One daily run, top to bottom:
 
 ```mermaid
 flowchart TD
-    T(["Windows Task Scheduler<br/>radar daily, 08:30"]) --> S1
+    T(["Windows Task Scheduler<br/>radar daily, every morning"]) --> S1
 
     subgraph SCAN["1. Read the feed: read-only browser"]
         S1["Playwright MCP<br/>agent Chromium, LinkedIn profile"] --> S2["extract_feed.js<br/>text, author, degree, links"]
@@ -68,7 +78,11 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
-| Command line | `src/radar/cli.py` | Runs the pipeline and reports status |
+| Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
+| Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
+| Settings | `src/radar/settings.py` | Typed, validated schema over `config/config.toml` |
+| Control panel | `src/radar/ui/` | FastAPI app and single-page interface behind `radar ui` |
+| Command line | `src/radar/cli.py` | Entry point for every command |
 
 ## Design decisions
 
@@ -83,6 +97,30 @@ Ollama runs the high-volume first-pass screen locally, and it leans toward keepi
 NotebookLM has no consumer API, so the agent drives it in a second browser profile. That client may click and type, but only behind a host guard: every interactive call first checks that the page is on `notebook.google.com` or `notebooklm.google.com` and refuses otherwise. A file upload is allowed only straight after a host-checked click. Automating NotebookLM is outside Google's intended use, the same kind of risk as the LinkedIn scan.
 
 The repository ignores `data/`, which contains feed records and the browser profile. Tests use synthetic fixtures. Selected post text and author information are included in the task sent to Codex for research.
+
+## Control panel
+
+```powershell
+radar ui
+```
+
+This opens a local web page at `http://127.0.0.1:8765`. Only your own computer can reach it.
+
+| Tab | What you can do |
+|---|---|
+| Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the last run's stages. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
+| Schedule | Change the daily run time or switch it off. |
+| Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
+| Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
+| Connection queue | Open each profile, then mark it Sent, Skip, or back to Todo. |
+| Digests | Read past digests, play their podcasts, and open their NotebookLM notebooks. |
+
+<p>
+<img src="docs/images/panel-settings.png" alt="Settings tab" width="49%">
+<img src="docs/images/panel-digests.png" alt="Digests tab" width="49%">
+</p>
+
+The panel has no login, so it defends itself in three ways. The server binds to the loopback address only. Every request must name a loopback host, which stops DNS-rebinding pages. Every change must carry a token that is created at launch and embedded in the page, which stops other websites from posting to it. Digest text comes from Codex reading arbitrary web pages, so the panel escapes any HTML in it before display.
 
 ## Installation
 
@@ -217,6 +255,12 @@ radar email-setup
 
 ### 7. Test it
 
+Check that every prerequisite is in place. Each failed check prints the command that fixes it.
+
+```powershell
+radar doctor
+```
+
 Start Ollama, then run the offline demo. It uses synthetic posts and replaces any existing `data/demo/` folder.
 
 ```powershell
@@ -245,10 +289,10 @@ radar email
 
 ### 8. Run it every day
 
-Register a daily run for 08:30:
+Register a daily run for 07:00:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 08:30
+powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 07:00
 ```
 
 The task runs while you are logged in. Logs are saved in `data\logs\`. To remove the task:
@@ -266,6 +310,14 @@ Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
 - **Git reports “detected dubious ownership” in a cloud-synced folder**: Run `git config --global --add safe.directory <path>`, replacing `<path>` with the repository's full path.
 
 ## Usage
+
+Every command below is also a button in the [control panel](#control-panel).
+
+```powershell
+radar doctor
+```
+
+Check Ollama, the model, Codex, the agent browser, both logins, the email password, and the schedule.
 
 ```powershell
 radar demo
@@ -319,12 +371,12 @@ Run a scan followed by a digest.
 radar status
 ```
 
-Show database counts, queue size and the latest digest.
+Show database counts, queue size, the latest digest, and the last run's stages.
 
-To schedule the daily cycle for 08:30:
+To schedule the daily cycle for 07:00:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install_schedule.ps1 -Time 08:30
+powershell -ExecutionPolicy Bypass -File scripts/install_schedule.ps1 -Time 07:00
 ```
 
 The task runs when the user is logged in and starts after a missed run when available. Remove the default task with:
@@ -332,6 +384,16 @@ The task runs when the user is logged in and starts after a missed run when avai
 ```powershell
 Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
 ```
+
+## Engineering
+
+- **Stage isolation.** `radar daily` runs scan, digest, and email as separate stages. A failed stage is recorded with its error, and the later stages still run, so a logged-out LinkedIn session still lets the backlog digest and the email go out. The command exits with code 1 when any stage fails, which Task Scheduler records.
+- **Run records.** Each daily run writes `data/runs/<timestamp>.json` with every stage's outcome, duration, counts, and error. The dashboard and `radar status` read them.
+- **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock older than three hours counts as stale.
+- **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
+- **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
+- **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. `radar doctor` masks email addresses and home-folder paths in its output.
+- **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
 ## Example output
 
@@ -351,6 +413,7 @@ Default paths are relative to the repository root:
 - `data/digests/YYYY-MM-DD/notebook_url.txt`: link to the day's NotebookLM notebook.
 - `data/digests/YYYY-MM-DD/episode.m4a`: the NotebookLM Audio Overview, when generation succeeds.
 - `data/digests/YYYY-MM-DD/codex_task.md` and `codex_result.json`: research prompt and structured result.
+- `data/runs/<timestamp>.json`: stage-by-stage record of each daily run.
 - `data/logs/`: scheduled daily-run logs.
 
 ## Podcast
@@ -388,7 +451,7 @@ To revoke access, delete the App Password in your Google account.
 
 ## Customizing the field
 
-Edit `config/field_profile.md` to define core topics, adjacent topics and material to skip. The local screen and Codex both use this profile. Run `radar reclassify` afterward to apply the change to stored posts.
+Edit `config/field_profile.md` to define core topics, adjacent topics and material to skip, and set `reader` under `[profile]` in `config/config.toml` to describe who the digest is for. Both are editable in the control panel. The local screen and Codex both use this profile. Run `radar reclassify` afterward to apply the change to stored posts.
 
 Concrete examples in the profile help the 9B model more than abstract categories. On the first live scan, adding one example line moved an agentic-coding preprint from skip to adjacent, and a biology rule stopped a protein-model press release from being marked core. Classification runs at temperature 0, so the same post gets the same verdict. Setting `think = true` under `[llm]` makes the model reason first; in tests this was about three times slower and not more accurate overall.
 
@@ -398,7 +461,7 @@ Concrete examples in the profile help the 9B model more than abstract categories
 .\.venv\Scripts\python -m pytest
 ```
 
-Tests cover classification, scanning, deduplication, link handling, queue exports, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, and email composition, using synthetic data and fakes.
+Tests cover classification, scanning, deduplication, link handling, queue exports, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, email composition and audio re-encoding, stage isolation and the run lock, health checks, settings validation, and the control panel API and its security checks. They use synthetic data and fakes, so they need no network, accounts, or GPU.
 
 ## Limitations
 

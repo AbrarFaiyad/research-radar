@@ -7,7 +7,20 @@ import re
 from dataclasses import asdict, dataclass, field
 
 TIERS = ("core", "adjacent", "skip")
-KINDS = ("paper", "preprint", "dataset", "model", "software", "result", "talk", "event", "news", "milestone", "ad", "other")
+KINDS = (
+    "paper",
+    "preprint",
+    "dataset",
+    "model",
+    "software",
+    "result",
+    "talk",
+    "event",
+    "news",
+    "milestone",
+    "ad",
+    "other",
+)
 
 
 @dataclass

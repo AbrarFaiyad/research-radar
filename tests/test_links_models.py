@@ -5,10 +5,15 @@ from radar.models import RawPost
 
 
 def test_unwrap_linkedin_safety_redirect():
-    wrapped = ("https://www.linkedin.com/safety/go/?url=https%3A%2F%2Flnkd%2Ein%2FgAbc123"
-               "&urlhash=x&isSdui=true")
+    wrapped = (
+        "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Flnkd%2Ein%2FgAbc123"
+        "&urlhash=x&isSdui=true"
+    )
     assert links.unwrap_linkedin(wrapped) == "https://lnkd.in/gAbc123"
-    assert links.unwrap_linkedin("https://arxiv.org/abs/2611.01234") == "https://arxiv.org/abs/2611.01234"
+    assert (
+        links.unwrap_linkedin("https://arxiv.org/abs/2611.01234")
+        == "https://arxiv.org/abs/2611.01234"
+    )
 
 
 def test_label_targets():
@@ -34,26 +39,47 @@ def test_resolve_follows_redirect_and_interstitial():
         if request.url.path == "/redirect":
             return httpx.Response(301, headers={"Location": "https://arxiv.org/abs/2611.00001"})
         if request.url.path == "/interstitial":
-            html = ('<a data-tracking-control-name="external_url_click" '
-                    'href="https://doi.org/10.1/x?a=1&amp;b=2">go</a>')
+            html = (
+                '<a data-tracking-control-name="external_url_click" '
+                'href="https://doi.org/10.1/x?a=1&amp;b=2">go</a>'
+            )
             return httpx.Response(200, text=html)
         if request.url.path == "/reordered":
-            html = ("<abbr>x</abbr><a class='btn' href='https://arxiv.org/abs/2611.00002?q=a&#38;b' "
-                    "data-tracking-control-name='external_url_click'>go</a>")
+            html = (
+                "<abbr>x</abbr><a class='btn' href='https://arxiv.org/abs/2611.00002?q=a&#38;b' "
+                "data-tracking-control-name='external_url_click'>go</a>"
+            )
             return httpx.Response(200, text=html)
         return httpx.Response(200, text="ok")
 
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
-    assert links.resolve("https://lnkd.in/redirect", client=client) == "https://arxiv.org/abs/2611.00001"
-    assert links.resolve("https://lnkd.in/interstitial", client=client) == "https://doi.org/10.1/x?a=1&b=2"
-    assert links.resolve("https://lnkd.in/reordered", client=client) == "https://arxiv.org/abs/2611.00002?q=a&b"
+    assert (
+        links.resolve("https://lnkd.in/redirect", client=client)
+        == "https://arxiv.org/abs/2611.00001"
+    )
+    assert (
+        links.resolve("https://lnkd.in/interstitial", client=client)
+        == "https://doi.org/10.1/x?a=1&b=2"
+    )
+    assert (
+        links.resolve("https://lnkd.in/reordered", client=client)
+        == "https://arxiv.org/abs/2611.00002?q=a&b"
+    )
     # Non-short links are returned untouched without a request.
     assert links.resolve("https://example.org/a", client=client) == "https://example.org/a"
 
 
 def test_rawpost_normalizes():
-    p = RawPost.from_dict({"key": "k", "author": "A", "authorUrl": "https://www.linkedin.com/in/a?x=1",
-                           "authorKind": "person", "degree": "3rd+", "text": "  hello  "})
+    p = RawPost.from_dict(
+        {
+            "key": "k",
+            "author": "A",
+            "authorUrl": "https://www.linkedin.com/in/a?x=1",
+            "authorKind": "person",
+            "degree": "3rd+",
+            "text": "  hello  ",
+        }
+    )
     assert p.author_url == "https://www.linkedin.com/in/a/"
     assert p.degree == "3rd+"
     assert p.text == "hello"

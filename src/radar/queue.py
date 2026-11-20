@@ -9,27 +9,40 @@ from pathlib import Path
 
 from .db import Store
 
-COLUMNS = ["rank", "name", "profile_url", "degree", "headline", "core_posts", "saved_posts",
-           "topics", "why", "first_seen", "status"]
+COLUMNS = [
+    "rank",
+    "name",
+    "profile_url",
+    "degree",
+    "headline",
+    "core_posts",
+    "saved_posts",
+    "topics",
+    "why",
+    "first_seen",
+    "status",
+]
 
 
 def queue_records(store: Store, include_done: bool = False) -> list[dict]:
     out = []
     for i, r in enumerate(store.queue_rows(include_done=include_done), start=1):
         topics = json.loads(r["latest_topics"] or "[]")
-        out.append({
-            "rank": i,
-            "name": r["name"] or "",
-            "profile_url": r["url"],
-            "degree": r["degree"] or "not shown",
-            "headline": r["headline"] or "",
-            "core_posts": r["core_posts"],
-            "saved_posts": r["saved_posts"],
-            "topics": ", ".join(topics),
-            "why": r["latest_summary"] or "",
-            "first_seen": (r["first_seen"] or "")[:10],
-            "status": r["status"],
-        })
+        out.append(
+            {
+                "rank": i,
+                "name": r["name"] or "",
+                "profile_url": r["url"],
+                "degree": r["degree"] or "not shown",
+                "headline": r["headline"] or "",
+                "core_posts": r["core_posts"],
+                "saved_posts": r["saved_posts"],
+                "topics": ", ".join(topics),
+                "why": r["latest_summary"] or "",
+                "first_seen": (r["first_seen"] or "")[:10],
+                "status": r["status"],
+            }
+        )
     return out
 
 

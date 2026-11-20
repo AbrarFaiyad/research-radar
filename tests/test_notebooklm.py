@@ -6,11 +6,11 @@ from radar.browser.mcp_client import NOTEBOOKLM_TOOLS, BrowserMCP, ToolNotAllowe
 from radar.notebooklm import audio_instructions, audio_state, find_ref, item_more_ref
 
 # Trimmed from a real Playwright MCP snapshot of the notebook page (2026-11-19).
-GENERATING = '''
+GENERATING = """
             - button "Infographic" [ref=e778] [cursor=pointer]:
             - button "Generating Audio Overview… Come back in a few minutes" [disabled]
-'''
-READY = '''
+"""
+READY = """
           - generic [ref=e179]:
             - button "Audio Overview" [ref=e411] [cursor=pointer]:
             - button "Infographic" [ref=e709] [cursor=pointer]:
@@ -21,13 +21,13 @@ READY = '''
                 - button "Play" [ref=e797]:
               - button "More" [ref=e801]:
   - generic [ref=e208]: Audio Overview 'Fixing Baseline Energy in MLIP Fine Tuning' is ready.
-'''
-SOURCES = '''
+"""
+SOURCES = """
               - button "More" [ref=e318]
               - radio "Deep dive A lively conversation between two hosts" [checked] [ref=e556]
               - radio "Default" [checked] [ref=e632] [cursor=pointer]
               - textbox "What should the AI hosts focus on in this episode?" [ref=e661]
-'''
+"""
 
 
 def test_find_ref_exact_then_loose():
@@ -59,8 +59,14 @@ def test_interactive_client_requires_host_guard(tmp_path):
 
 
 def test_upload_needs_preceding_click(tmp_path):
-    b = BrowserMCP("npx", [], tmp_path, tmp_path, allowed_tools=NOTEBOOKLM_TOOLS,
-                   allowed_hosts=frozenset({"notebook.google.com"}))
+    b = BrowserMCP(
+        "npx",
+        [],
+        tmp_path,
+        tmp_path,
+        allowed_tools=NOTEBOOKLM_TOOLS,
+        allowed_hosts=frozenset({"notebook.google.com"}),
+    )
     b.session = object()  # never reached: the guard refuses first
     with pytest.raises(ToolNotAllowed):
         asyncio.run(b.call("browser_file_upload", {"paths": ["x"]}))
@@ -79,17 +85,27 @@ class _FakeSession:
         class R:
             content = (C(),)
             is_error = False
+
         return R()
 
 
-@pytest.mark.parametrize("href,ok", [
-    ("https://notebook.google.com/notebook/abc", True),
-    ("https://www.linkedin.com/feed/", False),
-    ("https://accounts.google.com/signin", False),
-])
+@pytest.mark.parametrize(
+    "href,ok",
+    [
+        ("https://notebook.google.com/notebook/abc", True),
+        ("https://www.linkedin.com/feed/", False),
+        ("https://accounts.google.com/signin", False),
+    ],
+)
 def test_clicks_only_on_allowed_hosts(tmp_path, href, ok):
-    b = BrowserMCP("npx", [], tmp_path, tmp_path, allowed_tools=NOTEBOOKLM_TOOLS,
-                   allowed_hosts=frozenset({"notebook.google.com"}))
+    b = BrowserMCP(
+        "npx",
+        [],
+        tmp_path,
+        tmp_path,
+        allowed_tools=NOTEBOOKLM_TOOLS,
+        allowed_hosts=frozenset({"notebook.google.com"}),
+    )
     b.session = _FakeSession(href)
     if ok:
         asyncio.run(b.call("browser_click", {"target": "e1"}))
@@ -98,3 +114,9 @@ def test_clicks_only_on_allowed_hosts(tmp_path, href, ok):
         with pytest.raises(ToolNotAllowed):
             asyncio.run(b.call("browser_click", {"target": "e1"}))
         assert b.session.calls == ["browser_evaluate"]
+
+
+def test_instructions_use_configured_reader():
+    text = audio_instructions({"podcast_focus": ""}, reader="a battery chemist")
+    assert text.startswith("Audience: a battery chemist.")
+    assert "materials science PhD" not in text

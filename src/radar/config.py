@@ -10,6 +10,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
+class ProfileCfg:
+    # Who the digest and podcast are for, in one phrase. The topics live in field_profile.md.
+    reader: str = "a researcher who wants the most important new work in the field described below"
+
+
+@dataclass
 class BrowserCfg:
     mcp_command: str = "npx"
     mcp_args: list[str] = field(
@@ -53,16 +59,16 @@ class DigestCfg:
 @dataclass
 class NotebookLMCfg:
     enabled: bool = True
-    length: str = "default"      # NotebookLM Audio Overview length: shorter | default | longer
-    timeout_min: float = 30      # generation usually takes 5 to 15 minutes
-    add_web_sources: bool = True # add Codex's source URLs as website sources
+    length: str = "default"  # NotebookLM Audio Overview length: shorter | default | longer
+    timeout_min: float = 30  # generation usually takes 5 to 15 minutes
+    add_web_sources: bool = True  # add Codex's source URLs as website sources
 
 
 @dataclass
 class EmailCfg:
     enabled: bool = False
     to: str = ""
-    sender: str = ""          # Gmail account that sends; empty = same as `to`
+    sender: str = ""  # Gmail account that sends; empty = same as `to`
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
     subject_prefix: str = "Research Radar"
@@ -73,6 +79,7 @@ class Config:
     root: Path
     data_dir: Path
     field_profile: Path
+    profile: ProfileCfg
     browser: BrowserCfg
     scan: ScanCfg
     llm: LlmCfg
@@ -119,6 +126,7 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         root=root,
         data_dir=data_dir,
         field_profile=field_profile,
+        profile=_section(raw, "profile", ProfileCfg),
         browser=_section(raw, "browser", BrowserCfg),
         scan=_section(raw, "scan", ScanCfg),
         llm=_section(raw, "llm", LlmCfg),

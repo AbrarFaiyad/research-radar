@@ -18,7 +18,9 @@ from .browser.mcp_client import NOTEBOOKLM_TOOLS, BrowserMCP
 from .config import Config
 
 HOME = "https://notebook.google.com/"
-HOSTS = frozenset({"notebook.google.com", "notebooklm.google.com"})  # "Gemini Notebook" since Nov 2026
+HOSTS = frozenset(
+    {"notebook.google.com", "notebooklm.google.com"}
+)  # "Gemini Notebook" since Nov 2026
 
 STATE_JS = """() => ({
   url: location.href,
@@ -32,17 +34,24 @@ STATE_JS = """() => ({
 def browser(cfg: Config, headless: bool = False) -> BrowserMCP:
     args = [a for a in cfg.browser.mcp_args if a != "--headless"]
     return BrowserMCP(
-        cfg.browser.mcp_command, args, cfg.data_dir / "browser-profile-google",
-        output_dir=cfg.data_dir / "mcp-output-notebooklm", headless=headless,
-        allowed_tools=NOTEBOOKLM_TOOLS, allowed_hosts=HOSTS,
+        cfg.browser.mcp_command,
+        args,
+        cfg.data_dir / "browser-profile-google",
+        output_dir=cfg.data_dir / "mcp-output-notebooklm",
+        headless=headless,
+        allowed_tools=NOTEBOOKLM_TOOLS,
+        allowed_hosts=HOSTS,
     )
 
 
-async def login_flow(cfg: Config, log: Callable[[str], None] = print,
-                     timeout_min: float = 10) -> bool:
+async def login_flow(
+    cfg: Config, log: Callable[[str], None] = print, timeout_min: float = 10
+) -> bool:
     async with browser(cfg) as b:
         await b.navigate(HOME)
-        log("A browser window opened. Sign in to Google there (the agent never sees your password).")
+        log(
+            "A browser window opened. Sign in to Google there (the agent never sees your password)."
+        )
         deadline = time.monotonic() + timeout_min * 60
         while time.monotonic() < deadline:
             await b.wait(5)
@@ -62,27 +71,32 @@ def find_ref(snapshot: str, role: str, name: str) -> str:
     """Ref of the first `role "name"` node in a Playwright MCP snapshot; exact name first,
     then a case-insensitive substring match."""
     exact = re.compile(rf'- {re.escape(role)} "{re.escape(name)}"[^\n]*?\[ref=(e\d+)\]')
-    loose = re.compile(rf'- {re.escape(role)} "[^"\n]*{re.escape(name)}[^"\n]*"[^\n]*?\[ref=(e\d+)\]',
-                       re.IGNORECASE)
+    loose = re.compile(
+        rf'- {re.escape(role)} "[^"\n]*{re.escape(name)}[^"\n]*"[^\n]*?\[ref=(e\d+)\]',
+        re.IGNORECASE,
+    )
     m = exact.search(snapshot) or loose.search(snapshot)
     if not m:
         raise LookupError(f'{role} "{name}" not found on the NotebookLM page')
     return m.group(1)
 
 
-def audio_instructions(result: dict) -> str:
+def audio_instructions(result: dict, reader: str = "a researcher in this field") -> str:
     focus = (result.get("podcast_focus") or "").strip()
     return (
-        "Audience: a computational materials science PhD student who works on machine-learning "
-        "interatomic potentials, DFT and molecular dynamics. Cover every item in the briefing "
-        "document, most important first. For each, explain how the work was done and why it "
-        "matters, and say what it means for the listener's research. Use the linked sources for "
-        "detail. " + focus
+        f"Audience: {reader.strip()}. Cover every item in the briefing document, most important "
+        "first. For each, explain how the work was done and why it matters, and say what it means "
+        "for the listener's research. Use the linked sources for detail. " + focus
     )[:1900]
 
 
-LENGTH_LABEL = {"shorter": "Short", "short": "Short", "default": "Default",
-                "longer": "Long", "long": "Long"}
+LENGTH_LABEL = {
+    "shorter": "Short",
+    "short": "Short",
+    "default": "Default",
+    "longer": "Long",
+    "long": "Long",
+}
 
 
 def studio_section(snapshot: str) -> str:
@@ -105,7 +119,7 @@ def item_more_ref(snapshot: str) -> str:
     """Ref of the More button that follows the first Play button in the Studio list."""
     studio = studio_section(snapshot)
     play = re.search(r'button "Play" \[ref=e\d+\]', studio)
-    m = re.search(r'button "More" \[ref=(e\d+)\]', studio[play.end():] if play else studio)
+    m = re.search(r'button "More" \[ref=(e\d+)\]', studio[play.end() :] if play else studio)
     if not m:
         raise LookupError("Audio Overview menu button not found")
     return m.group(1)
@@ -130,7 +144,7 @@ def radio_container_ref(snapshot: str, name: str) -> str | None:
     lines = snapshot.splitlines()
     for i, ln in enumerate(lines):
         if re.search(rf'- radio "{re.escape(name)}', ln, re.IGNORECASE):
-            for prev in reversed(lines[max(0, i - 3):i]):
+            for prev in reversed(lines[max(0, i - 3) : i]):
                 m = re.search(r"\[ref=(e\d+)\] \[cursor=pointer\]", prev)
                 if m:
                     return m.group(1)
@@ -153,8 +167,13 @@ async def _choose_radio(b: BrowserMCP, name: str) -> None:
 async def _wait_for_download(out_dir: Path, since: float, timeout_s: float = 180) -> Path:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        files = [p for p in out_dir.glob("*") if p.suffix.lower() in (".m4a", ".mp3", ".wav")
-                 and p.stat().st_mtime >= since and p.stat().st_size > 0]
+        files = [
+            p
+            for p in out_dir.glob("*")
+            if p.suffix.lower() in (".m4a", ".mp3", ".wav")
+            and p.stat().st_mtime >= since
+            and p.stat().st_size > 0
+        ]
         if files:
             newest = max(files, key=lambda p: p.stat().st_mtime)
             size = newest.stat().st_size
@@ -165,12 +184,16 @@ async def _wait_for_download(out_dir: Path, since: float, timeout_s: float = 180
     raise TimeoutError("Audio Overview download did not arrive")
 
 
-async def generate_audio(cfg: Config, folder: Path, result: dict,
-                         log: Callable[[str], None] = print) -> Path:
+async def generate_audio(
+    cfg: Config, folder: Path, result: dict, log: Callable[[str], None] = print
+) -> Path:
     """Create a notebook from the digest, generate a Deep dive Audio Overview, download it."""
     summary = folder / "summary.md"
-    urls = (folder / "sources.txt").read_text(encoding="utf-8").split() \
-        if (folder / "sources.txt").exists() else []
+    urls = (
+        (folder / "sources.txt").read_text(encoding="utf-8").split()
+        if (folder / "sources.txt").exists()
+        else []
+    )
     out_dir = cfg.data_dir / "mcp-output-notebooklm"
     out_dir.mkdir(parents=True, exist_ok=True)
     nlm = cfg.notebooklm
@@ -191,8 +214,14 @@ async def generate_audio(cfg: Config, folder: Path, result: dict,
     return target
 
 
-async def _build_notebook(b: BrowserMCP, summary: Path, urls: list[str], url_file: Path,
-                          add_web: bool, log: Callable[[str], None]) -> None:
+async def _build_notebook(
+    b: BrowserMCP,
+    summary: Path,
+    urls: list[str],
+    url_file: Path,
+    add_web: bool,
+    log: Callable[[str], None],
+) -> None:
     await b.navigate(HOME)
     await b.wait(5)
     await _click(b, "button", "New notebook")
@@ -219,15 +248,22 @@ async def _build_notebook(b: BrowserMCP, summary: Path, urls: list[str], url_fil
         await b.wait(2)
         await _click(b, "button", "Websites")
         await b.wait(2)
-        await b.call("browser_type", {"element": "URL box", "target": '[placeholder="Paste any links"]',
-                                      "text": "\n".join(urls)})
+        await b.call(
+            "browser_type",
+            {
+                "element": "URL box",
+                "target": '[placeholder="Paste any links"]',
+                "text": "\n".join(urls),
+            },
+        )
         await b.wait(1)
         await _click(b, "button", "Insert")
         await b.wait(25)
 
 
-async def _generate_and_download(b: BrowserMCP, cfg: Config, result: dict,
-                                 log: Callable[[str], None]) -> float:
+async def _generate_and_download(
+    b: BrowserMCP, cfg: Config, result: dict, log: Callable[[str], None]
+) -> float:
     """Generate (unless a finished episode is already there), then start the download.
     Returns the timestamp the download must be newer than."""
     nlm = cfg.notebooklm
@@ -238,8 +274,14 @@ async def _generate_and_download(b: BrowserMCP, cfg: Config, result: dict,
         await _choose_radio(b, "Deep dive")
         await _choose_radio(b, LENGTH_LABEL.get(nlm.length, "Default"))
         focus = find_ref(await _snap(b), "textbox", "What should the AI hosts focus on")
-        await b.call("browser_type", {"element": "focus box", "target": focus,
-                                      "text": audio_instructions(result)})
+        await b.call(
+            "browser_type",
+            {
+                "element": "focus box",
+                "target": focus,
+                "text": audio_instructions(result, cfg.profile.reader),
+            },
+        )
         await _click(b, "button", "Generate now")
         log("NotebookLM is generating the Audio Overview (usually 5 to 15 minutes)")
         deadline = time.monotonic() + nlm.timeout_min * 60
@@ -260,5 +302,6 @@ async def _generate_and_download(b: BrowserMCP, cfg: Config, result: dict,
 
 def make_audio(cfg: Config, folder: Path, result: dict) -> Path:
     from .podcast import email_ready
+
     audio = asyncio.run(generate_audio(cfg, folder, result))
     return email_ready(audio)

@@ -67,6 +67,7 @@ def transcode_to_mp3(src: Path, kbps: int, sample_rate: int = 24000) -> Path:
 
 def duration_seconds(path: Path) -> float:
     import av
+
     with av.open(str(path)) as c:
         return float(c.duration / 1e6) if c.duration else 0.0
 

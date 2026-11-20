@@ -22,11 +22,13 @@ MAX_ATTACH_BYTES = 18 * 1024 * 1024  # Gmail caps messages at 25 MB after base64
 
 def get_password(username: str) -> str | None:
     import keyring
+
     return keyring.get_password(KEYRING_SERVICE, username)
 
 
 def set_password(username: str, password: str) -> None:
     import keyring
+
     keyring.set_password(KEYRING_SERVICE, username, password)
 
 
@@ -35,6 +37,7 @@ def md_to_html(text: str) -> str:
         import markdown
     except ImportError:  # plain fallback keeps email working without the extra
         import html
+
         return f"<pre style='white-space:pre-wrap;font-family:sans-serif'>{html.escape(text)}</pre>"
     body = markdown.markdown(text, extensions=["tables"])
     return (
@@ -43,7 +46,9 @@ def md_to_html(text: str) -> str:
     )
 
 
-def pick_attachments(candidates: list[Path], limit: int = MAX_ATTACH_BYTES) -> tuple[list[Path], list[str]]:
+def pick_attachments(
+    candidates: list[Path], limit: int = MAX_ATTACH_BYTES
+) -> tuple[list[Path], list[str]]:
     """Attach existing files in order until the size budget runs out. Returns (attached, notes)."""
     attached, notes, total = [], [], 0
     for p in candidates:
@@ -58,7 +63,9 @@ def pick_attachments(candidates: list[Path], limit: int = MAX_ATTACH_BYTES) -> t
     return attached, notes
 
 
-def build_message(cfg: EmailCfg, subject: str, body_md: str, attachments: list[Path]) -> EmailMessage:
+def build_message(
+    cfg: EmailCfg, subject: str, body_md: str, attachments: list[Path]
+) -> EmailMessage:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = cfg.sender or cfg.to
@@ -74,8 +81,9 @@ def build_message(cfg: EmailCfg, subject: str, body_md: str, attachments: list[P
     return msg
 
 
-def compose_daily(cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path,
-                  today: dt.date | None = None) -> EmailMessage:
+def compose_daily(
+    cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path, today: dt.date | None = None
+) -> EmailMessage:
     today = today or dt.date.today()
     queue_md = queue_dir / "connect_queue.md"
     parts: list[str] = []
@@ -83,15 +91,24 @@ def compose_daily(cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path,
     if digest_folder is not None and (digest_folder / "summary.md").exists():
         link_file = digest_folder / "notebook_url.txt"
         if link_file.exists():
-            parts.append(f"**Podcast:** attached, and playable in NotebookLM: "
-                         f"<{link_file.read_text(encoding='utf-8').strip()}>")
+            parts.append(
+                f"**Podcast:** attached, and playable in NotebookLM: "
+                f"<{link_file.read_text(encoding='utf-8').strip()}>"
+            )
         parts.append((digest_folder / "summary.md").read_text(encoding="utf-8"))
-        audio = sorted(digest_folder.glob("episode.*"),
-                       key=lambda p: [".mp3", ".m4a", ".wav"].index(p.suffix.lower())
-                       if p.suffix.lower() in (".mp3", ".m4a", ".wav") else 9)
+        audio = sorted(
+            digest_folder.glob("episode.*"),
+            key=lambda p: (
+                [".mp3", ".m4a", ".wav"].index(p.suffix.lower())
+                if p.suffix.lower() in (".mp3", ".m4a", ".wav")
+                else 9
+            ),
+        )
         candidates += audio[:1] + [digest_folder / "summary.md"]
     else:
-        parts.append(f"# Research Radar, {today.isoformat()}\n\nNo new saved posts for a digest today.")
+        parts.append(
+            f"# Research Radar, {today.isoformat()}\n\nNo new saved posts for a digest today."
+        )
     if queue_md.exists():
         parts.append(queue_md.read_text(encoding="utf-8"))
         candidates += [queue_dir / "connect_queue.csv"]

@@ -105,9 +105,13 @@ async def collect_feed(
     return col.posts[: cfg.max_posts]
 
 
-def process_posts(posts: list[RawPost], store: Store, classify: Classifier,
-                  resolve: Callable[[list[str], str], list[dict]] = resolve_all,
-                  log: Callable[[str], None] = print) -> ScanReport:
+def process_posts(
+    posts: list[RawPost],
+    store: Store,
+    classify: Classifier,
+    resolve: Callable[[list[str], str], list[dict]] = resolve_all,
+    log: Callable[[str], None] = print,
+) -> ScanReport:
     rep = ScanReport(seen=len(posts))
     for post in posts:
         if store.has_post(post):
@@ -120,9 +124,11 @@ def process_posts(posts: list[RawPost], store: Store, classify: Classifier,
         except Exception as e:  # noqa: BLE001 - model hiccup: record and keep going
             rep.errors.append(f"classify {post.author}: {e}")
             continue
-        links = resolve(post.links, post.text) if verdict.saved else [
-            {"url": u, "kind": "unresolved"} for u in post.links
-        ]
+        links = (
+            resolve(post.links, post.text)
+            if verdict.saved
+            else [{"url": u, "kind": "unresolved"} for u in post.links]
+        )
         store.add_post(post, verdict, links)
         if verdict.saved:
             rep.saved += 1
@@ -133,14 +139,18 @@ def process_posts(posts: list[RawPost], store: Store, classify: Classifier,
     return rep
 
 
-async def scan_live(cfg: Config, store: Store, classify: Classifier,
-                    log: Callable[[str], None] = print) -> ScanReport:
+async def scan_live(
+    cfg: Config, store: Store, classify: Classifier, log: Callable[[str], None] = print
+) -> ScanReport:
     from .browser.mcp_client import BrowserMCP
 
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     async with BrowserMCP(
-        cfg.browser.mcp_command, cfg.browser.mcp_args, cfg.profile_dir,
-        output_dir=cfg.data_dir / "mcp-output", headless=cfg.browser.headless,
+        cfg.browser.mcp_command,
+        cfg.browser.mcp_args,
+        cfg.profile_dir,
+        output_dir=cfg.data_dir / "mcp-output",
+        headless=cfg.browser.headless,
     ) as browser:
         await browser.navigate(cfg.browser.feed_url)
         await browser.wait(4)
@@ -155,26 +165,40 @@ async def scan_live(cfg: Config, store: Store, classify: Classifier,
     return process_posts(posts, store, classify, log=log)
 
 
-def scan_file(path: Path, store: Store, classify: Classifier,
-              log: Callable[[str], None] = print) -> ScanReport:
+def scan_file(
+    path: Path, store: Store, classify: Classifier, log: Callable[[str], None] = print
+) -> ScanReport:
     """Offline mode: process extractor-shaped JSON (used by tests and `radar demo`)."""
     records = json.loads(Path(path).read_text(encoding="utf-8"))
     col = Collector()
     col.add(records)
-    return process_posts(col.posts, store, classify, resolve=lambda urls, text: [
-        {"url": u, "kind": "fixture"} for u in urls
-    ], log=log)
+    return process_posts(
+        col.posts,
+        store,
+        classify,
+        resolve=lambda urls, text: [{"url": u, "kind": "fixture"} for u in urls],
+        log=log,
+    )
 
 
-async def login_flow(cfg: Config, log: Callable[[str], None] = print, timeout_min: float = 10) -> bool:
+async def login_flow(
+    cfg: Config, log: Callable[[str], None] = print, timeout_min: float = 10
+) -> bool:
     """Open a headed browser on the agent profile and wait for the user to log in by hand."""
     from .browser.mcp_client import BrowserMCP
 
     args = [a for a in cfg.browser.mcp_args if a != "--headless"]
-    async with BrowserMCP(cfg.browser.mcp_command, args, cfg.profile_dir,
-                          output_dir=cfg.data_dir / "mcp-output", headless=False) as browser:
+    async with BrowserMCP(
+        cfg.browser.mcp_command,
+        args,
+        cfg.profile_dir,
+        output_dir=cfg.data_dir / "mcp-output",
+        headless=False,
+    ) as browser:
         await browser.navigate(cfg.browser.feed_url)
-        log("A browser window opened. Log in to LinkedIn there (the agent never sees your password).")
+        log(
+            "A browser window opened. Log in to LinkedIn there (the agent never sees your password)."
+        )
         deadline = time.monotonic() + timeout_min * 60
         while time.monotonic() < deadline:
             await browser.wait(5)
@@ -189,9 +213,12 @@ async def login_flow(cfg: Config, log: Callable[[str], None] = print, timeout_mi
     return False
 
 
-def reclassify_stored(store: Store, classify: Classifier,
-                      resolve: Callable[[list[str], str], list[dict]] = resolve_all,
-                      log: Callable[[str], None] = print) -> tuple[int, int]:
+def reclassify_stored(
+    store: Store,
+    classify: Classifier,
+    resolve: Callable[[list[str], str], list[dict]] = resolve_all,
+    log: Callable[[str], None] = print,
+) -> tuple[int, int]:
     """Re-run classification on every stored post, e.g. after editing the field profile.
     Returns (checked, changed). Newly saved posts get their links resolved."""
     rows = store.conn.execute(
@@ -203,9 +230,16 @@ def reclassify_stored(store: Store, classify: Classifier,
         if r["kind"] == "ad":
             continue
         old_links = json.loads(r["links"] or "[]")
-        post = RawPost(key=r["card_key"] or "", author=r["author_name"], author_url=r["author_url"],
-                       author_kind=r["akind"] or "unknown", degree=r["adeg"], headline=r["ahead"],
-                       text=r["text"], links=[x["url"] for x in old_links])
+        post = RawPost(
+            key=r["card_key"] or "",
+            author=r["author_name"],
+            author_url=r["author_url"],
+            author_kind=r["akind"] or "unknown",
+            degree=r["adeg"],
+            headline=r["ahead"],
+            text=r["text"],
+            links=[x["url"] for x in old_links],
+        )
         verdict = classify(post)
         if verdict.tier == r["tier"]:
             continue

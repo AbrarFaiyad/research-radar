@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Radar</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #5f6b7a; --line: #e2e6ec;
+  --accent: #2f6fde; --accent-ink: #ffffff; --ok: #1f8a4c; --bad: #c43d3d; --warn: #b7791f;
+  --code: #f0f2f5; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1218; --panel: #171b23; --ink: #e6e9ef; --muted: #9aa4b2; --line: #2a303b;
+    --accent: #5b8ff0; --accent-ink: #0f1218; --ok: #4cc27f; --bad: #ef6b6b; --warn: #e2a845;
+    --code: #10141b; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; background: var(--panel);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+header .ver { color: var(--muted); font-size: 12px; }
+.pill { margin-left: auto; padding: 4px 12px; border-radius: 999px; font-size: 13px; background: var(--code); color: var(--muted); }
+.pill.run { background: var(--accent); color: var(--accent-ink); }
+nav { display: flex; gap: 4px; padding: 0 24px; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
+nav button { border: 0; background: none; color: var(--muted); padding: 12px 14px; font: inherit; cursor: pointer;
+  border-bottom: 2px solid transparent; white-space: nowrap; }
+nav button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px; }
+section.tab { display: none; } section.tab.active { display: block; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow); }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 8px; }
+.big { font-size: 28px; font-weight: 650; }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+button.btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 8px 14px;
+  border-radius: 8px; font: inherit; cursor: pointer; }
+button.btn:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input, select, textarea { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 10px; }
+textarea { width: 100%; min-height: 460px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px; }
+pre.log { background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 12px; height: 340px;
+  overflow: auto; font: 12.5px/1.45 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; margin: 0; }
+.stages { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.stage { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--code); }
+.stage.ok { color: var(--ok); } .stage.bad { color: var(--bad); }
+.checks { list-style: none; padding: 0; margin: 0; }
+.checks li { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 22px 170px 1fr; gap: 8px; }
+.checks li:last-child { border-bottom: 0; }
+.ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+.fix { grid-column: 3; font-size: 12.5px; color: var(--muted); font-family: Consolas, monospace; }
+form.settings fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px 6px; margin: 0 0 16px; background: var(--panel); }
+form.settings legend { font-weight: 600; padding: 0 6px; }
+.field { display: grid; grid-template-columns: 280px 1fr; gap: 12px; align-items: center; padding: 6px 0; }
+.field input[type=text], .field input[type=email] { width: 100%; }
+.field .help { font-size: 12px; color: var(--muted); }
+.field .err { color: var(--bad); font-size: 12.5px; }
+table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; }
+th { color: var(--muted); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .4px; }
+td .tag { display: inline-block; font-size: 12px; background: var(--code); border-radius: 6px; padding: 1px 6px; margin: 1px; }
+a { color: var(--accent); }
+.split { display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+.dlist button { display: block; width: 100%; text-align: left; margin-bottom: 8px; }
+.dlist button.active { border-color: var(--accent); }
+.digest { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 24px 24px; }
+.digest table { font-size: 13px; }
+audio { width: 100%; margin: 10px 0; }
+.toast { position: fixed; bottom: 20px; right: 20px; background: var(--ink); color: var(--bg); padding: 10px 16px;
+  border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; }
+.toast.show { opacity: .95; }
+@media (max-width: 800px) { .split, .field { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Research Radar</h1><span class="ver">v__RADAR_VERSION__</span>
+  <span id="pill" class="pill">idle</span>
+</header>
+<nav id="nav">
+  <button data-tab="dash" class="active">Dashboard</button>
+  <button data-tab="schedule">Schedule</button>
+  <button data-tab="settings">Settings</button>
+  <button data-tab="profile">Field profile</button>
+  <button data-tab="queue">Connection queue</button>
+  <button data-tab="digests">Digests</button>
+</nav>
+<main>
+<section id="dash" class="tab active">
+  <div class="grid">
+    <div class="card"><h2>Saved posts</h2><div class="big" id="k-saved">–</div><div class="muted" id="k-tiers"></div></div>
+    <div class="card"><h2>Connection queue</h2><div class="big" id="k-queue">–</div><div class="muted">people to review</div></div>
+    <div class="card"><h2>Last digest</h2><div class="big" id="k-digest">–</div><div class="muted" id="k-digest-sub"></div></div>
+    <div class="card"><h2>Next run</h2><div class="big" id="k-next">–</div><div class="muted" id="k-next-sub"></div></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h2>Last run</h2><div id="lastrun" class="muted">No runs recorded yet.</div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h2>Run now</h2>
+    <div class="row">
+      <button class="btn primary" data-run="daily">Full daily run</button>
+      <button class="btn" data-run="scan">Scan feed</button>
+      <label class="muted">posts <input id="maxposts" type="number" min="1" max="300" value="30" style="width:80px"></label>
+      <button class="btn" data-run="digest">Digest</button>
+      <button class="btn" data-run="podcast">Podcast</button>
+      <button class="btn" data-run="email">Email</button>
+      <button class="btn" data-run="reclassify">Re-judge posts</button>
+      <button class="btn danger" id="cancel" disabled>Cancel</button>
+    </div>
+    <p class="muted" id="jobline" style="margin:10px 0 6px">No job running.</p>
+    <pre class="log" id="log"></pre>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">Health</h2>
+      <div class="row"><button class="btn" data-run="login">LinkedIn login</button>
+        <button class="btn" data-run="notebooklm-login">NotebookLM login</button>
+        <button class="btn" id="recheck">Re-check</button></div></div>
+    <ul class="checks" id="checks"><li class="muted">Checking…</li></ul>
+  </div>
+</section>
+
+<section id="schedule" class="tab">
+  <div class="card" style="max-width:620px">
+    <h2>Daily run</h2>
+    <p class="muted">Runs <code>radar daily</code> through Windows Task Scheduler while you are logged in. A missed run starts when the PC wakes.</p>
+    <div class="row" style="margin:14px 0">
+      <label>Time <input id="s-time" type="time"></label>
+      <label class="row"><input id="s-enabled" type="checkbox"> Enabled</label>
+      <button class="btn primary" id="s-save">Save schedule</button>
+    </div>
+    <div id="s-info" class="muted"></div>
+  </div>
+</section>
+
+<section id="settings" class="tab">
+  <form class="settings" id="settings-form"></form>
+  <div class="row"><button class="btn primary" id="settings-save">Save settings</button>
+    <span class="muted">Saved to config/config.toml; comments in the file are kept.</span></div>
+</section>
+
+<section id="profile" class="tab">
+  <p class="muted">The local screen and Codex both judge relevance against this text. Concrete examples help more than broad categories.</p>
+  <textarea id="profile-text" spellcheck="false"></textarea>
+  <div class="row" style="margin-top:10px">
+    <button class="btn primary" id="profile-save">Save</button>
+    <button class="btn" id="profile-save-rejudge">Save and re-judge stored posts</button>
+  </div>
+</section>
+
+<section id="queue" class="tab">
+  <div class="row" style="margin-bottom:12px">
+    <label class="row"><input type="checkbox" id="q-all"> Show sent and skipped</label>
+    <span class="muted">Open a profile, decide, send the request yourself, then mark it.</span>
+  </div>
+  <table><thead><tr><th>#</th><th>Name</th><th>Degree</th><th>Why</th><th>Topics</th><th>Status</th><th></th></tr></thead>
+  <tbody id="q-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody></table>
+</section>
+
+<section id="digests" class="tab">
+  <div class="split">
+    <div class="dlist" id="d-list"><p class="muted">Loading…</p></div>
+    <div class="digest" id="d-view"><p class="muted">Pick a digest.</p></div>
+  </div>
+</section>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const TOKEN = "__RADAR_TOKEN__";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method: "POST", body: JSON.stringify(body),
+    headers: {"Content-Type": "application/json", "X-Radar-Token": TOKEN}};
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { const e = new Error(data.detail || r.statusText); e.data = data; throw e; }
+  return data;
+}
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 3500); }
+const fmtTime = s => s ? new Date(s).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"}) : "–";
+
+// ---- tabs
+$$("#nav button").forEach(b => b.onclick = () => {
+  $$("#nav button").forEach(x => x.classList.toggle("active", x === b));
+  $$("section.tab").forEach(s => s.classList.toggle("active", s.id === b.dataset.tab));
+  ({schedule: loadSchedule, settings: loadSettings, profile: loadProfile, queue: loadQueue, digests: loadDigests})[b.dataset.tab]?.();
+});
+
+// ---- dashboard
+async function loadStatus() {
+  const s = await api("/api/status");
+  const p = s.posts || {}; const saved = (p.core || 0) + (p.adjacent || 0);
+  $("#k-saved").textContent = saved;
+  $("#k-tiers").textContent = `${p.core || 0} core · ${p.adjacent || 0} adjacent · ${p.skip || 0} skipped`;
+  $("#k-queue").textContent = s.queue;
+  if (s.last_digest) { $("#k-digest").textContent = s.last_digest.name; $("#k-digest-sub").textContent = `${s.last_digest.item_count} candidates reviewed`; }
+  const r = s.last_run;
+  $("#lastrun").innerHTML = r ? `${esc(fmtTime(r.started))} · <b class="${r.ok ? "ok" : "bad"}">${r.ok ? "all stages ok" : "had failures"}</b>
+    <div class="stages">${r.stages.map(st => `<span class="stage ${st.ok ? "ok" : "bad"}" title="${esc(st.error || "")}">${esc(st.name)} ${st.ok ? "✓" : "✗"} ${st.seconds}s</span>`).join("")}</div>
+    ${r.stages.filter(st => !st.ok).map(st => `<div class="bad" style="font-size:13px;margin-top:6px">${esc(st.name)}: ${esc(st.error)}</div>`).join("")}` : "No runs recorded yet.";
+  if (s.lock && !(s.job && s.job.running)) { $("#pill").textContent = `${s.lock.owner} running (scheduler)`; $("#pill").className = "pill run"; }
+  return s;
+}
+async function loadNext() {
+  try { const s = await api("/api/schedule");
+    if (!s.supported) { $("#k-next").textContent = "n/a"; return s; }
+    $("#k-next").textContent = s.exists ? (s.enabled ? s.time : "off") : "not set";
+    $("#k-next-sub").textContent = s.exists && s.enabled ? `next ${fmtTime(s.next)}` : "open Schedule to set it";
+    return s; } catch (e) { $("#k-next").textContent = "?"; }
+}
+async function loadChecks() {
+  $("#checks").innerHTML = `<li class="muted">Checking…</li>`;
+  const cs = await api("/api/doctor");
+  $("#checks").innerHTML = cs.map(c => `<li><span class="${c.ok ? "ok" : (c.required ? "bad" : "warn")}">${c.ok ? "✓" : (c.required ? "✗" : "!")}</span>
+    <b>${esc(c.name)}</b><span class="muted">${esc(c.detail)}</span>${c.ok || !c.fix ? "" : `<span class="fix">${esc(c.fix)}</span>`}</li>`).join("");
+}
+$("#recheck").onclick = loadChecks;
+
+let logNext = 0, polling = null;
+async function pollLog() {
+  const d = await api(`/api/jobs/log?since=${logNext}`);
+  if (d.lines.length) { const pre = $("#log"); const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    pre.textContent += d.lines.join("\n") + "\n"; if (atEnd) pre.scrollTop = pre.scrollHeight; }
+  logNext = d.next;
+  const j = d.job; const running = j && j.running;
+  $("#pill").textContent = running ? `${j.action} running` : "idle"; $("#pill").className = "pill" + (running ? " run" : "");
+  $("#cancel").disabled = !running;
+  $$("[data-run]").forEach(b => b.disabled = !!running);
+  $("#jobline").textContent = j ? (running ? `Running ${j.action} since ${new Date(j.started * 1000).toLocaleTimeString()}…`
+    : `Last job: ${j.action}, exit code ${j.returncode} (${j.returncode === 0 ? "ok" : "failed"})`) : "No job running.";
+  if (!running && polling) { clearInterval(polling); polling = null; loadStatus(); loadChecks(); }
+  return running;
+}
+$$("[data-run]").forEach(b => b.onclick = async () => {
+  const body = {action: b.dataset.run};
+  if (body.action === "scan") body.max_posts = +$("#maxposts").value || 30;
+  try { await api("/api/jobs", body); $("#log").textContent = ""; logNext = 0; toast(`Started ${body.action}`);
+    if (!polling) polling = setInterval(pollLog, 1000); pollLog(); }
+  catch (e) { toast(e.message); }
+});
+$("#cancel").onclick = async () => { await api("/api/jobs/cancel", {}); toast("Cancelling…"); };
+
+// ---- schedule
+async function loadSchedule() {
+  const s = await loadNext(); if (!s) return;
+  if (!s.supported) { $("#s-info").textContent = "Scheduling works on Windows only."; return; }
+  $("#s-time").value = s.time || "07:00"; $("#s-enabled").checked = s.exists ? s.enabled : true;
+  $("#s-info").innerHTML = s.exists ? `State: ${esc(s.state)} · next run ${esc(fmtTime(s.next))} · last run ${esc(fmtTime(s.last))}${s.lastResult !== undefined && s.last ? ` (result ${s.lastResult})` : ""}` : "No scheduled task yet.";
+}
+$("#s-save").onclick = async () => {
+  try { await api("/api/schedule", {time: $("#s-time").value, enabled: $("#s-enabled").checked}); toast("Schedule saved"); loadSchedule(); }
+  catch (e) { toast(e.message); }
+};
+
+// ---- settings
+let schema = [];
+async function loadSettings() {
+  const d = await api("/api/settings"); schema = d.schema;
+  const bySec = {}; schema.forEach(f => (bySec[f.section] ||= []).push(f));
+  const LABELS = {profile: "Reader", scan: "Feed scan", browser: "Agent browser", llm: "Local model",
+    digest: "Codex digest", notebooklm: "NotebookLM podcast", email: "Daily email"};
+  $("#settings-form").innerHTML = Object.entries(bySec).map(([sec, fs]) => `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.map(f => {
+    const v = d.values[f.id]; let input;
+    if (f.kind === "bool") input = `<input type="checkbox" name="${f.id}" ${v ? "checked" : ""}>`;
+    else if (f.kind === "choice") input = `<select name="${f.id}">${f.choices.map(c => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
+    else if (f.kind === "int" || f.kind === "float") input = `<input type="number" name="${f.id}" value="${esc(v)}" ${f.lo != null ? `min="${f.lo}"` : ""} ${f.hi != null ? `max="${f.hi}"` : ""} step="${f.kind === "int" ? 1 : "any"}" style="width:140px">`;
+    else input = `<input type="${f.kind === "email" ? "email" : "text"}" name="${f.id}" value="${esc(v)}">`;
+    return `<div class="field"><label for="${f.id}">${esc(f.label)}${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}</label><div>${input}<div class="err" data-err="${f.id}"></div></div></div>`;
+  }).join("")}</fieldset>`).join("");
+}
+$("#settings-save").onclick = async () => {
+  const body = {}; schema.forEach(f => { const el = $(`[name="${f.id}"]`); if (!el) return;
+    body[f.id] = f.kind === "bool" ? el.checked : el.value; });
+  $$("[data-err]").forEach(e => e.textContent = "");
+  try { await api("/api/settings", body); toast("Settings saved"); }
+  catch (e) { const errs = e.data?.errors || {}; Object.entries(errs).forEach(([k, m]) => { const el = $(`[data-err="${k}"]`); if (el) el.textContent = m; });
+    toast(Object.keys(errs).length ? "Fix the highlighted settings" : e.message); }
+};
+
+// ---- profile
+async function loadProfile() { $("#profile-text").value = (await api("/api/profile")).text; }
+async function saveProfile() { await api("/api/profile", {text: $("#profile-text").value}); toast("Field profile saved"); }
+$("#profile-save").onclick = () => saveProfile().catch(e => toast(e.message));
+$("#profile-save-rejudge").onclick = async () => {
+  try { await saveProfile(); await api("/api/jobs", {action: "reclassify"});
+    $$("#nav button")[0].click(); $("#log").textContent = ""; logNext = 0; if (!polling) polling = setInterval(pollLog, 1000); }
+  catch (e) { toast(e.message); }
+};
+
+// ---- queue
+async function loadQueue() {
+  const rows = await api(`/api/queue?all=${$("#q-all").checked}`);
+  $("#q-body").innerHTML = rows.length ? rows.map(r => `<tr><td>${r.rank}</td>
+    <td><a href="${esc(r.profile_url)}" target="_blank" rel="noopener">${esc(r.name)}</a><div class="muted" style="font-size:12.5px">${esc(r.headline)}</div></td>
+    <td>${esc(r.degree)}</td><td>${esc(r.why)}</td>
+    <td>${r.topics.split(", ").filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("")}</td>
+    <td>${esc(r.status)}</td>
+    <td class="row"><button class="btn" data-mark="sent" data-url="${esc(r.profile_url)}">Sent</button>
+      <button class="btn" data-mark="skip" data-url="${esc(r.profile_url)}">Skip</button>
+      ${r.status !== "todo" ? `<button class="btn" data-mark="todo" data-url="${esc(r.profile_url)}">Undo</button>` : ""}</td></tr>`).join("")
+    : `<tr><td colspan="7" class="muted">Queue is empty. The next scan adds people behind saved posts.</td></tr>`;
+  $$("[data-mark]").forEach(b => b.onclick = async () => {
+    await api("/api/queue/mark", {profile_url: b.dataset.url, status: b.dataset.mark}); loadQueue(); loadStatus(); });
+}
+$("#q-all").onchange = loadQueue;
+
+// ---- digests
+async function loadDigests() {
+  const ds = await api("/api/digests");
+  $("#d-list").innerHTML = ds.length ? ds.map(d => `<button class="btn" data-d="${esc(d.name)}"><b>${esc(d.name)}</b>
+    <div class="muted" style="font-size:13px">${d.kept != null ? `${d.kept} kept of ${d.reviewed}` : ""}${d.audio ? " · podcast" : ""}</div>
+    <div style="font-size:13px">${esc(d.headline)}</div></button>`).join("") : `<p class="muted">No digests yet.</p>`;
+  $$("[data-d]").forEach(b => b.onclick = () => showDigest(b.dataset.d, ds.find(x => x.name === b.dataset.d), b));
+  if (ds.length) $$("[data-d]")[0].click();
+}
+async function showDigest(name, meta, btn) {
+  $$("[data-d]").forEach(x => x.classList.toggle("active", x === btn));
+  const d = await api(`/api/digests/${encodeURIComponent(name)}`);
+  $("#d-view").innerHTML = `${meta.audio ? `<audio controls preload="none" src="/api/digests/${encodeURIComponent(name)}/audio"></audio>` : `<p class="muted">No podcast for this digest.</p>`}
+    ${meta.notebook ? `<p><a href="${esc(meta.notebook)}" target="_blank" rel="noopener">Open in NotebookLM</a></p>` : ""}${d.html}`;
+}
+
+// ---- boot
+loadStatus(); loadNext(); loadChecks(); pollLog().then(r => { if (r && !polling) polling = setInterval(pollLog, 1000); });
+setInterval(() => { if (!polling) loadStatus(); }, 15000);
+</script>
+</body>
+</html>

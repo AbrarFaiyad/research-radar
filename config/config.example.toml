@@ -4,6 +4,10 @@
 data_dir = "data"
 field_profile = "config/field_profile.md"
 
+[profile]
+# Who the digest and podcast are for. Change this and config/field_profile.md for your field.
+reader = "a computational materials science PhD student working on machine-learning interatomic potentials, DFT, and molecular dynamics"
+
 [browser]
 # Playwright MCP server, pinned. Uses its own persistent profile; log in once with `radar login`.
 mcp_command = "npx"

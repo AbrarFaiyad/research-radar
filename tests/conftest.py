@@ -10,18 +10,48 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 # Verdicts a well-behaved model would give for the synthetic feed, keyed by a text snippet.
 EXPECTED = {
-    "molten LiCl-KCl": {"tier": "core", "kind": "preprint", "topics": ["mlip", "mace", "molten salts"],
-                        "summary": "LoRA fine-tuning of MACE for molten LiCl-KCl.", "reason": "core MLIP"},
-    "10,000 GPUs": {"tier": "adjacent", "kind": "paper", "topics": ["hpc", "mlip"],
-                    "summary": "Scaling equivariant GNN potentials on exascale.", "reason": "HPC"},
-    "defended today": {"tier": "skip", "kind": "milestone", "topics": [],
-                       "summary": "PhD defense congratulations.", "reason": "milestone"},
-    "capacity auction": {"tier": "skip", "kind": "news", "topics": [],
-                         "summary": "Energy market auction.", "reason": "unrelated"},
-    "oxygen substitution in MoS2": {"tier": "core", "kind": "paper", "topics": ["mos2", "tribology"],
-                                    "summary": "ML-potential MD of O-doped MoS2 friction.", "reason": "core"},
-    "50 million DFT": {"tier": "core", "kind": "dataset", "topics": ["dataset", "electrochemistry"],
-                       "summary": "Open DFT dataset for electrochemical interfaces.", "reason": "core"},
+    "molten LiCl-KCl": {
+        "tier": "core",
+        "kind": "preprint",
+        "topics": ["mlip", "mace", "molten salts"],
+        "summary": "LoRA fine-tuning of MACE for molten LiCl-KCl.",
+        "reason": "core MLIP",
+    },
+    "10,000 GPUs": {
+        "tier": "adjacent",
+        "kind": "paper",
+        "topics": ["hpc", "mlip"],
+        "summary": "Scaling equivariant GNN potentials on exascale.",
+        "reason": "HPC",
+    },
+    "defended today": {
+        "tier": "skip",
+        "kind": "milestone",
+        "topics": [],
+        "summary": "PhD defense congratulations.",
+        "reason": "milestone",
+    },
+    "capacity auction": {
+        "tier": "skip",
+        "kind": "news",
+        "topics": [],
+        "summary": "Energy market auction.",
+        "reason": "unrelated",
+    },
+    "oxygen substitution in MoS2": {
+        "tier": "core",
+        "kind": "paper",
+        "topics": ["mos2", "tribology"],
+        "summary": "ML-potential MD of O-doped MoS2 friction.",
+        "reason": "core",
+    },
+    "50 million DFT": {
+        "tier": "core",
+        "kind": "dataset",
+        "topics": ["dataset", "electrochemistry"],
+        "summary": "Open DFT dataset for electrochemical interfaces.",
+        "reason": "core",
+    },
 }
 
 
@@ -38,8 +68,11 @@ class FakeModel:
             if self.curate_items is not None:
                 return {"items": self.curate_items}
             views = json.loads(user)
-            return {"items": [{"post_id": v["post_id"], "title": v["summary"], "why": "test"}
-                              for v in views]}
+            return {
+                "items": [
+                    {"post_id": v["post_id"], "title": v["summary"], "why": "test"} for v in views
+                ]
+            }
         for snippet, verdict in EXPECTED.items():
             if snippet in user:
                 return dict(verdict)

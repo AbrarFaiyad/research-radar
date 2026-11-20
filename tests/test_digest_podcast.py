@@ -17,7 +17,9 @@ TODAY = dt.date(2026, 11, 19)
 
 
 def _seed(store):
-    scan_file(FIXTURES / "feed_sample.json", store, Classifier(FakeModel(), "p"), log=lambda s: None)
+    scan_file(
+        FIXTURES / "feed_sample.json", store, Classifier(FakeModel(), "p"), log=lambda s: None
+    )
 
 
 def _walk(schema):
@@ -56,6 +58,7 @@ def test_task_sends_every_candidate_with_limits(store, cfg):
 
 def test_braces_in_post_text_do_not_break_formatting(store, cfg):
     from radar.models import RawPost, Verdict
+
     post = RawPost.from_dict({"key": "b", "author": "A", "text": "Energy E = {x | x > 0} " * 3})
     store.add_post(post, Verdict("core", "paper", [], "s", "r"), [])
     template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
@@ -66,15 +69,27 @@ def test_braces_in_post_text_do_not_break_formatting(store, cfg):
 FAKE_RESULT = {
     "headline": "LoRA makes foundation potentials cheap to specialize",
     "overview": "Reviewed 4, kept 1.",
-    "items": [{
-        "post_ids": [1], "title": "Low-rank adaptation of MACE for molten salts",
-        "kind": "preprint", "authors": "D. Example et al.", "venue": "arXiv",
-        "primary_url": "https://example.org/preprint/molten-salt-lora",
-        "sources": [{"title": "Code", "url": "https://github.com/example/lora"},
-                    {"title": "Dup", "url": "https://example.org/preprint/molten-salt-lora"}],
-        "what": "w", "how": "h", "why_it_matters": "y", "relevance": "r", "limitations": "l",
-        "impact": "high", "confidence": "high",
-    }],
+    "items": [
+        {
+            "post_ids": [1],
+            "title": "Low-rank adaptation of MACE for molten salts",
+            "kind": "preprint",
+            "authors": "D. Example et al.",
+            "venue": "arXiv",
+            "primary_url": "https://example.org/preprint/molten-salt-lora",
+            "sources": [
+                {"title": "Code", "url": "https://github.com/example/lora"},
+                {"title": "Dup", "url": "https://example.org/preprint/molten-salt-lora"},
+            ],
+            "what": "w",
+            "how": "h",
+            "why_it_matters": "y",
+            "relevance": "r",
+            "limitations": "l",
+            "impact": "high",
+            "confidence": "high",
+        }
+    ],
     "rejected": [{"post_id": 2, "reason": "HPC, low signal"}],
     "podcast_focus": "Lead with LoRA.",
 }
@@ -96,14 +111,17 @@ def test_run_digest_sends_all_candidates_and_marks_them(cfg, store):
         out.write_bytes(b"x")
         return out
 
-    res = run_digest(cfg, store, runner=runner, make_audio=make_audio, log=lambda s: None,
-                     today=TODAY)
+    res = run_digest(
+        cfg, store, runner=runner, make_audio=make_audio, log=lambda s: None, today=TODAY
+    )
     assert res is not None and res.reviewed == n_saved == 4 and res.kept == 1
     assert seen["task"].count("### Candidate ") == 4
     md = res.summary_md.read_text(encoding="utf-8")
     assert "1 kept of 4 candidate posts" in md and "[Code](https://github.com/example/lora)" in md
     assert (res.folder / "sources.txt").read_text(encoding="utf-8").split() == [
-        "https://example.org/preprint/molten-salt-lora", "https://github.com/example/lora"]
+        "https://example.org/preprint/molten-salt-lora",
+        "https://github.com/example/lora",
+    ]
     assert seen["audio_called_with"] == "Lead with LoRA." and res.audio.exists()
     # Codex judged all four, so none come back tomorrow.
     assert store.saved_posts(undigested_only=True) == []
@@ -134,8 +152,12 @@ def test_same_day_reruns_get_new_folders(cfg, store):
 
     first = run_digest(cfg, store, runner=runner, log=lambda s: None, today=TODAY)
     from radar.models import RawPost, Verdict
-    store.add_post(RawPost.from_dict({"key": "n", "author": "B", "text": "new post " * 10}),
-                   Verdict("core", "paper", [], "s", "r"), [])
+
+    store.add_post(
+        RawPost.from_dict({"key": "n", "author": "B", "text": "new post " * 10}),
+        Verdict("core", "paper", [], "s", "r"),
+        [],
+    )
     second = run_digest(cfg, store, runner=runner, log=lambda s: None, today=TODAY)
     assert (first.folder.name, second.folder.name) == ("2026-11-19", "2026-11-19-2")
 
@@ -145,3 +167,11 @@ def test_render_and_sources_handle_missing_urls():
     md = render_markdown(missing, "d", 3)
     assert "Primary source not found." in md and "<>" not in md
     assert source_urls(missing) == []
+
+
+def test_reader_comes_from_config_not_hardcoded(store, cfg):
+    _seed(store)
+    template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
+    task = build_codex_task(store.saved_posts(), "p", template, 5, 15, reader="a battery chemist")
+    assert "The reader is a battery chemist." in task
+    assert "molten salts, MoS2" not in task

@@ -20,16 +20,35 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 ALLOWED_TOOLS = frozenset(
-    {"browser_navigate", "browser_evaluate", "browser_wait_for", "browser_snapshot", "browser_close"}
+    {
+        "browser_navigate",
+        "browser_evaluate",
+        "browser_wait_for",
+        "browser_snapshot",
+        "browser_close",
+    }
 )
 
 
 INTERACTIVE_TOOLS = frozenset(
-    {"browser_click", "browser_type", "browser_press_key", "browser_file_upload",
-     "browser_fill_form", "browser_select_option", "browser_hover"}
+    {
+        "browser_click",
+        "browser_type",
+        "browser_press_key",
+        "browser_file_upload",
+        "browser_fill_form",
+        "browser_select_option",
+        "browser_hover",
+    }
 )
-NOTEBOOKLM_TOOLS = ALLOWED_TOOLS | {"browser_click", "browser_type", "browser_press_key",
-                                    "browser_file_upload", "browser_hover", "browser_tabs"}
+NOTEBOOKLM_TOOLS = ALLOWED_TOOLS | {
+    "browser_click",
+    "browser_type",
+    "browser_press_key",
+    "browser_file_upload",
+    "browser_hover",
+    "browser_tabs",
+}
 
 
 class ToolNotAllowed(RuntimeError):
@@ -55,8 +74,10 @@ class BrowserMCP:
             raise ValueError("interactive browser tools require an allowed_hosts guard")
         self.command = command
         self.args = list(args) + [
-            "--user-data-dir", str(profile_dir),
-            "--output-dir", str(output_dir),
+            "--user-data-dir",
+            str(profile_dir),
+            "--output-dir",
+            str(output_dir),
         ]
         if headless:
             self.args.append("--headless")
@@ -105,7 +126,10 @@ class BrowserMCP:
 
     async def _check_host(self, tool: str) -> None:
         from urllib.parse import urlparse
-        result = await self.session.call_tool("browser_evaluate", {"function": "() => location.href"})
+
+        result = await self.session.call_tool(
+            "browser_evaluate", {"function": "() => location.href"}
+        )
         try:
             href = parse_evaluate_result("\n".join(getattr(c, "text", "") for c in result.content))
         except ValueError as e:

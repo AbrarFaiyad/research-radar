@@ -13,8 +13,14 @@ class ChatModel(Protocol):
 
 
 class OllamaModel:
-    def __init__(self, host: str, model: str, num_ctx: int = 16384, timeout_s: float = 120,
-                 think: bool = False):
+    def __init__(
+        self,
+        host: str,
+        model: str,
+        num_ctx: int = 16384,
+        timeout_s: float = 120,
+        think: bool = False,
+    ):
         self.host = host.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx

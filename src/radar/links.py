@@ -13,11 +13,19 @@ SHORTENERS = ("lnkd.in", "bit.ly", "t.co", "buff.ly", "ow.ly", "tinyurl.com")
 _RULES: list[tuple[str, re.Pattern[str]]] = [
     ("arxiv", re.compile(r"arxiv\.org/(abs|pdf|html)/", re.IGNORECASE)),
     ("doi", re.compile(r"(doi\.org/10\.|/doi/(abs/|full/|pdf/)?10\.)", re.IGNORECASE)),
-    ("preprint", re.compile(r"(biorxiv|chemrxiv|medrxiv|ssrn|openreview|researchsquare)\.", re.IGNORECASE)),
-    ("journal", re.compile(
-        r"(nature\.com|science\.org|pubs\.acs\.org|pubs\.aip\.org|link\.springer\.com|"
-        r"sciencedirect\.com|wiley\.com|iopscience|pnas\.org|rsc\.org|cell\.com|aps\.org|"
-        r"mdpi\.com|tandfonline\.com|proceedings\.mlr\.press|neurips\.cc|aclanthology)", re.IGNORECASE)),
+    (
+        "preprint",
+        re.compile(r"(biorxiv|chemrxiv|medrxiv|ssrn|openreview|researchsquare)\.", re.IGNORECASE),
+    ),
+    (
+        "journal",
+        re.compile(
+            r"(nature\.com|science\.org|pubs\.acs\.org|pubs\.aip\.org|link\.springer\.com|"
+            r"sciencedirect\.com|wiley\.com|iopscience|pnas\.org|rsc\.org|cell\.com|aps\.org|"
+            r"mdpi\.com|tandfonline\.com|proceedings\.mlr\.press|neurips\.cc|aclanthology)",
+            re.IGNORECASE,
+        ),
+    ),
     ("code", re.compile(r"(github\.com|gitlab\.com|huggingface\.co)", re.IGNORECASE)),
 ]
 
