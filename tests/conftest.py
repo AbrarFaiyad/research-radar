@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from radar.config import load_config
+from radar.config import BuildsCfg, load_config
 from radar.db import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -102,7 +102,8 @@ def _build_data_in_tmp(tmp_path, monkeypatch):
 def cfg(tmp_path):
     c = load_config(root=Path(__file__).resolve().parents[1])
     c.data_dir = tmp_path / "data"
-    c.builds.work_dir = str(tmp_path / "builds")
+    # never the owner's real builds settings (config.toml may enable them for the real repo)
+    c.builds = BuildsCfg(work_dir=str(tmp_path / "builds"))
     return c
 
 
