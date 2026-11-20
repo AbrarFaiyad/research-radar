@@ -1,6 +1,8 @@
+import base64
 import os
 import struct
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -8,13 +10,23 @@ from radar.builds import scan
 
 FAKE_KEY = "sk-ant-api03-" + "x" * 40
 MARK = "fakeowner.example"
-PNG = (
-    b"\x89PNG\r\n\x1a\n"
-    + struct.pack(">I", 13)
-    + b"IHDR"
-    + b"\x00" * 13
-    + struct.pack(">I", zlib.crc32(b"IHDR" + b"\x00" * 13))
-)
+
+
+def _chunk(kind, body=b""):
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+
+def make_png(*extra):
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        + b"".join(extra)
+        + _chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+        + _chunk(b"IEND")
+    )
+
+
+PNG = make_png()
 
 
 def _scan(root, **kw):
@@ -68,7 +80,9 @@ def test_high_entropy_token(root):
 
 def test_requirements_hash_not_flagged(root):
     h = "0123456789abcdef" * 4
-    (root / "requirements.txt").write_text(f"pkg==1.0 \\n    --hash=sha256:{h}\n", encoding="utf-8")
+    (root / "requirements.txt").write_text(
+        f"pkg==1.0 \\\n    --hash=sha256:{h}\n", encoding="utf-8"
+    )
     assert _scan(root) == []
 
 
@@ -79,9 +93,24 @@ def test_personal_marker_case_insensitive(root):
 
 
 def test_marker_in_file_name(root):
-    (root / f"{MARK}.txt").write_text("x", encoding="utf-8")
+    (root / f"me@{MARK}.txt").write_text("x", encoding="utf-8")
     f = _scan(root)
-    assert "personal information" in _reasons(f)
+    assert "personal information" in _reasons(f) and MARK not in str(f).lower()
+    assert f[0].path == "<redacted-name-1>"
+
+
+def test_marker_name_redacted_below_directory(root):
+    (root / MARK).mkdir()
+    (root / MARK / "k.txt").write_text(FAKE_KEY, encoding="utf-8")
+    f = _scan(root)
+    assert MARK not in str(f).lower() and "api03" not in str(f)
+    assert any(x.path == "<redacted-name-1>/k.txt" for x in f)
+
+
+def test_secret_in_file_name(root):
+    (root / (FAKE_KEY + ".txt")).write_text("x", encoding="utf-8")
+    f = _scan(root)
+    assert "secret pattern" in _reasons(f) and "api03" not in str(f)
 
 
 def test_short_and_empty_markers_ignored(root):
@@ -112,7 +141,7 @@ def test_symlink(root, tmp_path):
     assert "link" in _reasons(_scan(root))
 
 
-def test_hard_link(root, tmp_path):
+def test_hard_link(root):
     try:
         os.link(root / "main.py", root / "hl.py")
     except OSError:
@@ -152,7 +181,7 @@ def test_fake_png_blocked(root):
 
 
 def test_png_metadata_scanned(root):
-    (root / "p.png").write_bytes(PNG + b"tEXt" + FAKE_KEY.encode())
+    (root / "p.png").write_bytes(make_png(_chunk(b"tEXt", b"Comment\x00" + FAKE_KEY.encode())))
     assert "secret pattern" in _reasons(_scan(root))
 
 
@@ -169,8 +198,108 @@ def test_personal_markers(cfg, monkeypatch):
     monkeypatch.setenv("RADAR_PRIVATE_MARKERS", "555-0100, Jane Q Fake ,")
     m = scan.personal_markers(cfg)
     assert "me@fakeowner.example" in m and "555-0100" in m and "Jane Q Fake" in m
-    from pathlib import Path
-
     home = str(Path.home())
     assert home in m and home.replace("\\", "/") in m
     assert all(len(x) >= 3 for x in m)
+
+
+def test_utf16_after_padding(root):
+    (root / "a.txt").write_bytes(("\u4e01" * 5000 + FAKE_KEY).encode("utf-16-le"))
+    assert "binary" in _reasons(_scan(root))
+
+
+def test_nul_late_still_binary():
+    assert "binary" in _reasons(scan.scan_bytes("a.txt", b"a" * 9000 + b"\x00b", []))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"me%40fakeowner.example",
+        b"me&#64;fakeowner.example",
+        b"me@fakeowner.\nexample",
+        b"C:%5CUsers%5Cbob",
+        b"C:\\Users/bob",
+    ],
+)
+def test_encoded_bypasses(data):
+    f = scan.scan_bytes("a.txt", data, [MARK])
+    assert f and MARK not in str(f)
+
+
+def test_accented_marker_forms():
+    m = ["Jos\u00e9 Fake"]
+    assert scan.scan_bytes("a.txt", "Jos\u00e9 Fake".encode("cp1252"), m)
+    assert scan.scan_bytes("a.txt", "Jose\u0301 Fake".encode("utf-8"), m)
+    assert scan.scan_bytes("a.txt", "JOSE\u0301 fake".encode("utf-8"), m)
+
+
+def test_png_chunks():
+    z = _chunk(b"zTXt", b"Comment\x00\x00" + zlib.compress(FAKE_KEY.encode()))
+    assert "secret pattern" in _reasons(scan.scan_bytes("p.png", make_png(z), []))
+    i = _chunk(b"iTXt", b"k\x00\x01\x00en\x00k\x00" + zlib.compress(MARK.encode()))
+    assert "personal information" in _reasons(scan.scan_bytes("p.png", make_png(i), [MARK]))
+    assert "binary" in _reasons(scan.scan_bytes("p.png", make_png(_chunk(b"zzZz", b"x")), []))
+    assert "binary" in _reasons(scan.scan_bytes("p.png", PNG + b"trailing", []))
+    assert scan.scan_bytes("p.png", make_png(_chunk(b"pHYs", b"\x00" * 9)), [MARK]) == []
+
+
+def test_pixel_data_not_marker_scanned():
+    assert scan.scan_bytes("p.png", PNG, ["IHD", "IDA", "IEN"]) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "See https://github.com/materialsproject/pymatgen/blob/master/pymatgen/core/structure.py",
+        "https://github.com/ACEsuit/mace/tree/main/mace/calculators/foundations_models",
+        "https://huggingface.co/datasets/fairchem/OMAT24/resolve/main/train",
+        "--8<-- docs/MaterialsProjectStructureRelaxationTutorial",
+        '"integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg=="',
+    ],
+)
+def test_ordinary_content_passes(line):
+    assert scan.scan_bytes("README.md", line.encode(), []) == []
+
+
+def test_svg_embedded_png():
+    prefix = b'<svg><image href="data:image/png;base64,'
+    ok = prefix + base64.b64encode(PNG) + b'"/></svg>'
+    assert scan.scan_bytes("a.svg", ok, []) == []
+    bad_png = make_png(_chunk(b"tEXt", b"k\x00" + FAKE_KEY.encode()))
+    bad = prefix + base64.b64encode(bad_png) + b'"/></svg>'
+    assert "secret pattern" in _reasons(scan.scan_bytes("a.svg", bad, []))
+
+
+def test_base64_encoded_fake_key_caught():
+    enc = base64.b64encode(("sk-ant-api03-" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1x").encode())
+    assert "secret pattern" in _reasons(scan.scan_bytes("a.txt", enc, []))
+
+
+REAL = "sk-ant-api03-" + "Ab3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d"
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda k: k.encode().hex().encode(),
+        lambda k: base64.b64encode(k.encode()),
+        lambda k: base64.b64encode(b"x" + k.encode()),
+        lambda k: base64.b64encode(b"xy" + k.encode()),
+        lambda k: base64.b64encode(k.encode()).replace(b"A", b"a"),
+        lambda k: ("(" + " ".join(repr(k[i : i + 6]) for i in range(0, len(k), 6)) + ")").encode(),
+        lambda k: k.lower().encode(),
+        lambda k: k.replace("-", " ").encode(),
+        lambda k: k[13:].encode(),
+        lambda k: k.encode("utf-16-le"),
+    ],
+)
+def test_known_secret_forms(make):
+    f = scan.scan_bytes("a.txt", make(REAL), [], secrets=[REAL])
+    assert f and "Ab3dE5" not in str(f)
+
+
+def test_known_secret_clean_and_tree(root):
+    assert scan.scan_bytes("a.txt", b"nothing here", [], secrets=[REAL]) == []
+    (root / "x.txt").write_text(REAL.encode().hex(), encoding="utf-8")
+    assert scan.scan_tree(root, [], 5, 20, secrets=[REAL])
