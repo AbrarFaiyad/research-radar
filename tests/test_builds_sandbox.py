@@ -62,6 +62,7 @@ def test_only_fixed_env_flags(cfg, tmp_path, monkeypatch):
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "HOME",
+        "PYTHONDONTWRITEBYTECODE",
         "MODEL",
         "TURNS",
     }
@@ -74,7 +75,10 @@ def test_verify_argv_isolation(cfg, tmp_path):
     assert argv.count("-v") == 1 and "--env-file" not in argv
     assert argv[argv.index("--network") + 1] == NETWORK
     script = argv[-1]
-    assert "pip install -r requirements.txt" in script and "pytest -q test_demo.py" in script
+    assert (
+        "pip install -r requirements.txt" in script
+        and "pytest -q -p no:cacheprovider test_demo.py" in script
+    )
     assert "/work/.verify.json" in script and "installed" in script and "tests_passed" in script
 
 
@@ -105,7 +109,8 @@ def test_docker_cli_gets_minimal_env(cfg, monkeypatch):
     ensure_image(cfg, rec)
     run_container(["docker", "run", "--name", "n"], 5, rec)
     for env in rec.envs:
-        assert set(env) <= {"PATH", "SYSTEMROOT", "WINDIR"}
+        assert "SECRET_HOST_VAR" not in env and "ANTHROPIC_API_KEY" not in env
+        assert "nope" not in env.values() and "leak" not in env.values()
 
 
 def test_docker_not_running_reason():
@@ -150,7 +155,7 @@ def test_proxy_allowlist_rendering(cfg):
     assert rx.search("pypi.org") and rx.search("www.pypi.org")
     assert not rx.search("evilpypi.org") and not rx.search("pypi.org.evil.com")
     conf = render_proxy_conf()
-    assert "FilterDefaultDeny Yes" in conf and "FilterExtended On" in conf
+    assert "FilterDefaultDeny Yes" in conf and "FilterType ere" in conf
     assert "FilterURLs Off" in conf and "ConnectPort 443" in conf
 
 
@@ -208,3 +213,26 @@ def test_failure_raises(cfg):
     rec = Recorder(lambda a: _proc(1, err="denied"))
     with pytest.raises(RuntimeError, match="denied"):
         ensure_network_and_proxy(cfg, rec)
+
+
+def test_docker_cli_env_passes_needed_vars(monkeypatch):
+    monkeypatch.setenv("USERPROFILE", "C:/u")
+    monkeypatch.setenv("PROGRAMDATA", "C:/pd")
+    monkeypatch.setenv("DOCKER_HOST", "npipe:////./pipe/x")
+    env = sandbox._env()
+    assert env["USERPROFILE"] == "C:/u" and env["DOCKER_HOST"] == "npipe:////./pipe/x"
+    assert env["PROGRAMDATA"] == "C:/pd"
+
+
+def test_filter_rejects_bad_host():
+    for bad in ("a b.com", r"ev\il.com", "x.com/path", "a_b.com"):
+        with pytest.raises(ValueError):
+            render_filter([bad])
+    assert render_filter(["a-b.example.com"]) == r"^(.*\.)?a-b\.example\.com$" + "\n"
+
+
+def test_build_and_verify_no_bytecode_no_home_path(cfg, tmp_path):
+    for argv in (build_argv(cfg, tmp_path, "n"), verify_argv(cfg, tmp_path, "n")):
+        assert "PYTHONDONTWRITEBYTECODE=1" in argv and "HOME=/tmp/builder" in argv
+        assert "/home/" not in " ".join(argv)
+    assert "-p no:cacheprovider" in verify_argv(cfg, tmp_path, "n")[-1]

@@ -24,12 +24,13 @@ PROXY_IMAGE = "radar-builds-proxy:1"
 PROXY_URL = f"http://{PROXY}:8888"
 DOCKER_DIR = REPO_ROOT / "docker"
 ENTRY = "/usr/local/bin/entry.sh"
+_HOST_RE = re.compile(r"[a-z0-9.-]+")
 
 VERIFY_SCRIPT = (
     "cd /work && rm -f .verify.json; installed=false; passed=false; "
     "if python -m venv /tmp/v && /tmp/v/bin/pip install -r requirements.txt; then "
     "installed=true; "
-    "if /tmp/v/bin/python -m pytest -q test_demo.py; then passed=true; fi; "
+    "if /tmp/v/bin/python -m pytest -q -p no:cacheprovider test_demo.py; then passed=true; fi; "
     "fi; "
     'printf \'{ "installed": %s, "tests_passed": %s }\\n\' "$installed" "$passed" '
     "> /work/.verify.json"
@@ -38,7 +39,25 @@ VERIFY_SCRIPT = (
 
 def _env() -> dict[str, str]:
     """Minimal environment for the docker CLI: nothing from the host beyond what it must have."""
-    keep = ("PATH", "SYSTEMROOT", "WINDIR")
+    keep = (
+        "PATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "HOME",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+    )
+    # os.environ keys are upper-cased on Windows, so the names above match there too.
     return {k: os.environ[k] for k in keep if k in os.environ}
 
 
@@ -66,7 +85,14 @@ def docker_ready(run=subprocess.run) -> tuple[bool, str]:
 
 def render_filter(hosts: list[str]) -> str:
     """One anchored regex per host; it also matches subdomains."""
-    lines = [f"^(.*\\.)?{re.escape(h.strip().lower())}$" for h in hosts if h.strip()]
+    lines = []
+    for host in hosts:
+        host = host.strip().lower()
+        if not host:
+            continue
+        if not _HOST_RE.fullmatch(host):
+            raise ValueError(f"invalid allow_hosts entry: {host!r}")
+        lines.append("^(.*\\.)?" + host.replace(".", "\\.") + "$")
     return "\n".join(lines) + "\n"
 
 
@@ -124,7 +150,7 @@ def _base_argv(cfg, name: str) -> list[str]:
     argv += ["--cpus", str(b.cpus), "--memory", f"{b.memory_gb}g", "--pids-limit", "512"]
     argv += ["--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--user", "1000:1000"]
     argv += ["--env", f"HTTPS_PROXY={PROXY_URL}", "--env", f"HTTP_PROXY={PROXY_URL}"]
-    argv += ["--env", "HOME=/home/builder"]
+    argv += ["--env", "HOME=/tmp/builder", "--env", "PYTHONDONTWRITEBYTECODE=1"]
     return argv
 
 
