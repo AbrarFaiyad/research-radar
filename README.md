@@ -241,7 +241,7 @@ You never need the command line after installing; every command here is a button
 | `radar digest [--no-audio]` | Codex selects, sources, and summarizes the strongest 5 to 15 undigested posts, then NotebookLM makes the podcast | Dashboard, Digest |
 | `radar podcast [folder]` | Make the podcast again for a digest | Digests, Make podcast |
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
-| `radar daily` | Scan, digest, and email as isolated stages, with a run record | Dashboard, Full daily run |
+| `radar daily` | Scan, digest, build (when enabled), and email as isolated stages, with a run record | Dashboard, Full daily run |
 | `radar build [folder] [--retry] [--prepare]` | Build and publish the day's demo from a digest. `--retry` runs a day that already has a record again. `--prepare` builds the Docker image and proxy and does not run a build | Daily builds, Retry; Setup, Build image |
 | `radar builds-key` | Store the Anthropic API key for builds (hidden prompt) | Setup, Anthropic API key (daily builds) |
 | `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
@@ -252,7 +252,7 @@ Codex reviews every candidate once, and saved posts older than three days (`back
 
 ## Engineering
 
-- **Stage isolation.** `radar daily` runs scan, digest, and email as separate stages. A failed stage is recorded with its error, and the later stages still run, so a logged-out LinkedIn session still lets the backlog digest and the email go out. The command exits with code 1 when any stage fails, which Task Scheduler records.
+- **Stage isolation.** `radar daily` runs scan, digest, build (when enabled), and email as separate stages. A failed stage is recorded with its error, and the later stages still run, so a logged-out LinkedIn session still lets the backlog digest and the email go out. The command exits with code 1 when any stage fails, which Task Scheduler records.
 - **Run records.** Each daily run writes `data/runs/<timestamp>.json` with every stage's outcome, duration, counts, and error. The dashboard and `radar status` read them.
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
@@ -341,19 +341,21 @@ No personal information may leave your computer through a build. The rules are:
 
 - Nothing personal enters the sandbox. Claude receives only the selected item's public fields, the field profile that is already public in this repository, and the build instructions. The database, queue, connections, CV, settings, email details, and browser profiles stay out.
 - The sandbox starts with an empty environment. It has no host environment variables, git settings, SSH keys, or GitHub token. The only host folder it can write to is an empty output folder for that build.
-- The sandbox reaches only an allowlist of sites, such as PyPI, GitHub, Hugging Face, and the Anthropic API. Traffic goes through a proxy, and everything else is refused, including your local network. A malicious package therefore cannot probe your network or send data to an arbitrary server.
+- The sandbox reaches only an allowlist of sites, such as PyPI, GitHub, Hugging Face, and the Anthropic API. Traffic goes through a proxy, and everything else is refused, including your local network. A malicious package therefore cannot reach other servers or your local network. Allowlisted sites can still receive uploads, so the API key could leave through them. Keep the key's spend limit low.
 - A second, fresh container installs the requirements and runs the smoke test. Your computer never runs code from a build.
-- Before any push, every file is scanned for API keys, your email addresses, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the push is blocked and the build stays local. The panel shows the reason.
-- Images are stripped of metadata. Only PNG and SVG outputs are allowed.
-- Commits use your GitHub noreply identity and UTC time, so they carry no personal name, email, or time zone.
+- Before any push, every file is scanned for API keys, your email addresses, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the push is blocked. The same happens when a build fails. Its files are deleted, and the panel shows the reason.
+- PNG metadata is removed. Only PNG and SVG outputs are allowed.
+- Commits carry the git name and noreply email you configure, with UTC time. The name is published in every commit, so choose one you are happy to publish.
 - A build whose demo did not run is still published. Its README and the index label it "did not run".
+
+The scan has limits. It cannot detect data deliberately hidden in image pixels. The real protection is that the sandbox never holds anything personal. A person does not review a build before it is pushed.
 
 The build uses a dedicated Anthropic API key. Unlike everything else, this key does live inside the sandbox, so a malicious package could read it. Create the key in the Anthropic Console with a low monthly spend limit, and use it for nothing else.
 
 ### Set up daily builds
 
 1. Install WSL2. Run `wsl --install` in an administrator PowerShell, then restart the computer.
-2. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+2. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/). It must use the WSL2 engine and be running before you build.
 3. Create a public GitHub repo, for example `daily-builds`.
 4. On the Setup tab, store the Anthropic API key. It goes to Windows Credential Manager, and the panel never shows it again.
 5. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`).
