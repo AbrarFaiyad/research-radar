@@ -1,0 +1,210 @@
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from radar.builds import sandbox
+from radar.builds.sandbox import (
+    NETWORK,
+    PROXY,
+    api_key_env_file,
+    build_argv,
+    docker_ready,
+    ensure_image,
+    ensure_network_and_proxy,
+    render_filter,
+    render_proxy_conf,
+    run_container,
+    verify_argv,
+)
+
+
+def _proc(code=0, out="", err=""):
+    return subprocess.CompletedProcess([], code, out, err)
+
+
+class Recorder:
+    def __init__(self, handler=None):
+        self.calls = []
+        self.envs = []
+        self.handler = handler or (lambda argv: _proc())
+
+    def __call__(self, argv, **kw):
+        self.calls.append(list(argv))
+        self.envs.append(kw.get("env"))
+        return self.handler(argv)
+
+
+def test_build_argv_isolation(cfg, tmp_path):
+    argv = build_argv(cfg, tmp_path, "rb-1", env_file=tmp_path / "x.env")
+    assert argv.count("-v") == 1 and f"{tmp_path}:/work" in " ".join(argv)
+    assert argv[argv.index("--network") + 1] == NETWORK
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--user") + 1] == "1000:1000"
+    assert argv[argv.index("--cpus") + 1] == "4" and argv[argv.index("--memory") + 1] == "8g"
+    assert argv[argv.index("--pids-limit") + 1] == "512"
+    assert "no-new-privileges" in argv and "--rm" in argv
+    assert f"HTTPS_PROXY=http://{PROXY}:8888" in argv and f"HTTP_PROXY=http://{PROXY}:8888" in argv
+    assert "--privileged" not in argv and "host" not in argv
+    assert not any("docker.sock" in a for a in argv)
+    # The workdir is the only path allowed to carry a user name.
+    rest = [a for a in argv if a != f"{tmp_path}:/work" and a != str(tmp_path / "x.env")]
+    assert not any(a.startswith("PATH=") or "faiya" in a.lower() for a in rest)
+    assert argv[-2:] == [cfg.builds.image, sandbox.ENTRY]
+
+
+def test_only_fixed_env_flags(cfg, tmp_path, monkeypatch):
+    monkeypatch.setenv("SECRET_HOST_VAR", "nope")
+    argv = build_argv(cfg, tmp_path, "rb-1", env_file=tmp_path / "x.env")
+    values = [argv[i + 1] for i, a in enumerate(argv) if a == "--env"]
+    assert {v.split("=")[0] for v in values} == {
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "HOME",
+        "MODEL",
+        "TURNS",
+    }
+    assert "nope" not in " ".join(argv)
+    assert "ANTHROPIC_API_KEY" not in " ".join(values)
+
+
+def test_verify_argv_isolation(cfg, tmp_path):
+    argv = verify_argv(cfg, tmp_path, "rv-1")
+    assert argv.count("-v") == 1 and "--env-file" not in argv
+    assert argv[argv.index("--network") + 1] == NETWORK
+    script = argv[-1]
+    assert "pip install -r requirements.txt" in script and "pytest -q test_demo.py" in script
+    assert "/work/.verify.json" in script and "installed" in script and "tests_passed" in script
+
+
+def test_env_file_holds_only_api_key(monkeypatch):
+    monkeypatch.setenv("SECRET_HOST_VAR", "nope")
+    with api_key_env_file("sk-test-123") as path:
+        assert path.read_text(encoding="utf-8") == "ANTHROPIC_API_KEY=sk-test-123\n"
+        assert "nope" not in path.read_text(encoding="utf-8")
+    assert not path.exists()
+
+
+def test_env_file_deleted_on_error():
+    with pytest.raises(RuntimeError), api_key_env_file("sk-test-123") as path:
+        raise RuntimeError("boom")
+    assert not path.exists()
+
+
+def test_env_file_rejects_newline():
+    with pytest.raises(ValueError), api_key_env_file("a\nB=c"):
+        pass
+
+
+def test_docker_cli_gets_minimal_env(cfg, monkeypatch):
+    monkeypatch.setenv("SECRET_HOST_VAR", "nope")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "leak")
+    rec = Recorder()
+    docker_ready(rec)
+    ensure_image(cfg, rec)
+    run_container(["docker", "run", "--name", "n"], 5, rec)
+    for env in rec.envs:
+        assert set(env) <= {"PATH", "SYSTEMROOT", "WINDIR"}
+
+
+def test_docker_not_running_reason():
+    assert docker_ready(Recorder(lambda a: _proc(1, err="cannot connect"))) == (
+        False,
+        "docker not running",
+    )
+    assert docker_ready(Recorder()) == (True, "")
+
+
+def test_docker_not_installed_reason():
+    def boom(argv, **kw):
+        raise FileNotFoundError("docker")
+
+    assert docker_ready(boom) == (False, "docker not installed")
+
+
+def test_timeout_kills_container():
+    def handler(argv):
+        if argv[:2] == ["docker", "run"]:
+            raise subprocess.TimeoutExpired(argv, 1)
+        raise OSError("kill failed")  # kill errors are ignored
+
+    rec = Recorder(handler)
+    code, msg = run_container(["docker", "run", "--name", "rb-9", "img"], 1, rec)
+    assert code != 0 and "timed out" in msg
+    assert ["docker", "kill", "rb-9"] in rec.calls
+
+
+def test_run_container_returns_output():
+    rec = Recorder(lambda a: _proc(3, "out", "err"))
+    assert run_container(["docker", "run", "--name", "n"], 5, rec) == (3, "outerr")
+
+
+def test_proxy_allowlist_rendering(cfg):
+    text = render_filter(cfg.builds.allow_hosts)
+    lines = text.splitlines()
+    assert len(lines) == len(cfg.builds.allow_hosts)
+    assert r"^(.*\.)?pypi\.org$" in lines
+    assert all(re.fullmatch(r"\^\(\.\*\\\.\)\?[a-z0-9\\.\-]+\$", ln) for ln in lines)
+    rx = re.compile(lines[0])
+    assert rx.search("pypi.org") and rx.search("www.pypi.org")
+    assert not rx.search("evilpypi.org") and not rx.search("pypi.org.evil.com")
+    conf = render_proxy_conf()
+    assert "FilterDefaultDeny Yes" in conf and "FilterExtended On" in conf
+    assert "FilterURLs Off" in conf and "ConnectPort 443" in conf
+
+
+def test_ensure_image_skips_when_present(cfg):
+    rec = Recorder()
+    ensure_image(cfg, rec)
+    assert not any(c[:2] == ["docker", "build"] for c in rec.calls)
+
+
+def test_ensure_image_builds_when_missing(cfg):
+    rec = Recorder(lambda a: _proc(1) if a[1:3] == ["image", "inspect"] else _proc())
+    ensure_image(cfg, rec)
+    build = [c for c in rec.calls if c[:2] == ["docker", "build"]]
+    assert build and build[0][:4] == ["docker", "build", "-t", cfg.builds.image]
+    assert Path(build[0][-1]).parts[-2:] == ("docker", "build")
+
+
+def test_ensure_network_and_proxy_creates_everything(cfg):
+    seen = {}
+
+    def handler(argv):
+        if argv[1:3] in (["network", "inspect"], ["inspect", "-f"]):
+            return _proc(1)
+        if argv[1] == "build":
+            ctx = Path(argv[-1])
+            seen["filter"] = (ctx / "filter").read_text(encoding="utf-8")
+            seen["conf"] = (ctx / "tinyproxy.conf").read_text(encoding="utf-8")
+        return _proc(0, "sha256:abc true")
+
+    rec = Recorder(handler)
+    ensure_network_and_proxy(cfg, rec)
+    assert ["docker", "network", "create", "--internal", NETWORK] in rec.calls
+    assert ["docker", "network", "connect", "bridge", PROXY] in rec.calls
+    run = next(c for c in rec.calls if c[:2] == ["docker", "run"])
+    assert NETWORK in run and PROXY in run and "-v" not in run and "--privileged" not in run
+    assert seen["filter"] == render_filter(cfg.builds.allow_hosts)
+    assert "FilterDefaultDeny Yes" in seen["conf"]
+
+
+def test_ensure_network_and_proxy_noop_when_current(cfg):
+    def handler(argv):
+        if argv[1:3] == ["image", "inspect"]:
+            return _proc(0, "sha256:abc")
+        if argv[1] == "inspect":
+            return _proc(0, "sha256:abc true")
+        return _proc()
+
+    rec = Recorder(handler)
+    ensure_network_and_proxy(cfg, rec)
+    assert not any(c[:3] == ["docker", "network", "create"] for c in rec.calls)
+    assert not any(c[:2] == ["docker", "run"] for c in rec.calls)
+
+
+def test_failure_raises(cfg):
+    rec = Recorder(lambda a: _proc(1, err="denied"))
+    with pytest.raises(RuntimeError, match="denied"):
+        ensure_network_and_proxy(cfg, rec)
