@@ -75,6 +75,41 @@ class EmailCfg:
 
 
 @dataclass
+class BuildsCfg:
+    enabled: bool = False
+    mode: str = "with_digest"  # with_digest | separate
+    separate_time: str = "08:30"
+    repo: str = ""  # owner/name
+    git_name: str = ""
+    git_email: str = ""
+    image: str = "research-radar-build:1"
+    cpus: int = 4
+    memory_gb: int = 8
+    timeout_min: int = 45
+    max_file_mb: float = 5
+    max_folder_mb: float = 20
+    allow_hosts: list[str] = field(
+        default_factory=lambda: [
+            "pypi.org",
+            "files.pythonhosted.org",
+            "github.com",
+            "codeload.github.com",
+            "objects.githubusercontent.com",
+            "raw.githubusercontent.com",
+            "huggingface.co",
+            "cdn-lfs.huggingface.co",
+            "readthedocs.io",
+            "readthedocs.org",
+            "github.io",
+            "api.anthropic.com",
+            "registry.npmjs.org",
+        ]
+    )
+    claude_model: str = "sonnet"
+    max_turns: int = 60
+
+
+@dataclass
 class Config:
     root: Path
     data_dir: Path
@@ -86,6 +121,7 @@ class Config:
     digest: DigestCfg
     notebooklm: NotebookLMCfg
     email: EmailCfg = field(default_factory=EmailCfg)
+    builds: BuildsCfg = field(default_factory=BuildsCfg)
     source: Path | None = None  # the TOML file this config came from
 
     @property
@@ -103,6 +139,10 @@ class Config:
     @property
     def digests_dir(self) -> Path:
         return self.data_dir / "digests"
+
+    @property
+    def builds_dir(self) -> Path:
+        return self.data_dir / "builds"
 
     def field_profile_text(self) -> str:
         return self.field_profile.read_text(encoding="utf-8")
@@ -134,5 +174,6 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         digest=_section(raw, "digest", DigestCfg),
         notebooklm=_section(raw, "notebooklm", NotebookLMCfg),
         email=_section(raw, "email", EmailCfg),
+        builds=_section(raw, "builds", BuildsCfg),
         source=path.resolve() if path.exists() else None,
     )

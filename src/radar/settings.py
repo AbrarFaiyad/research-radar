@@ -23,6 +23,7 @@ class Field:
     hi: float | None = None
     choices: tuple[str, ...] = ()
     help: str = ""
+    pattern: str = ""  # str kinds: a non-empty value must match this regex
 
     @property
     def id(self) -> str:
@@ -71,6 +72,32 @@ SCHEMA: tuple[Field, ...] = (
     Field("email", "to", "email", "Send to"),
     Field("email", "sender", "email", "Send from (empty = same)"),
     Field("email", "subject_prefix", "str", "Subject prefix"),
+    Field("builds", "enabled", "bool", "Make a daily learning build", help="Needs a repo."),
+    Field(
+        "builds",
+        "mode",
+        "choice",
+        "When to build",
+        choices=("with_digest", "separate"),
+        help="With the digest, or at its own time.",
+    ),
+    Field(
+        "builds", "separate_time", "str", "Separate build time (HH:MM)", pattern=r"^\d{2}:\d{2}$"
+    ),
+    Field(
+        "builds",
+        "repo",
+        "str",
+        "GitHub repo (owner/name)",
+        pattern=r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$",
+    ),
+    Field("builds", "git_name", "str", "Commit author name"),
+    Field("builds", "git_email", "email", "Commit author email"),
+    Field("builds", "cpus", "int", "Build CPUs", 1, 16),
+    Field("builds", "memory_gb", "int", "Build memory (GB)", 1, 64),
+    Field("builds", "timeout_min", "int", "Build time limit (min)", 5, 240),
+    Field("builds", "max_file_mb", "float", "Max file size (MB)", 0.1, 50),
+    Field("builds", "max_folder_mb", "float", "Max build folder size (MB)", 1, 200),
 )
 BY_ID = {f.id: f for f in SCHEMA}
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -124,6 +151,8 @@ def coerce(f: Field, raw: Any) -> Any:
         raise ValueError(f"must be one of {', '.join(f.choices)}")
     if f.kind == "email" and text and not _EMAIL.match(text):
         raise ValueError("is not an email address")
+    if f.pattern and text and not re.match(f.pattern, text):
+        raise ValueError("has the wrong format")
     if len(text) > 500:
         raise ValueError("is too long")
     return text
@@ -151,6 +180,8 @@ def validate(updates: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]
             errors[hi] = f"must be at least {BY_ID[lo].label.lower()} ({a:g})"
     if merged.get("email.enabled") and not merged.get("email.to"):
         errors["email.to"] = "is required when email is on"
+    if merged.get("builds.enabled") and not merged.get("builds.repo"):
+        errors["builds.repo"] = "is required when daily builds are on"
     if errors:
         raise SettingsError(errors)
     return clean

@@ -167,7 +167,16 @@ def test_queue_and_digest_views(client, root):
 
 def test_schema_covers_every_config_section():
     sections = {f.section for f in settings.SCHEMA}
-    assert sections == {"profile", "scan", "browser", "llm", "digest", "notebooklm", "email"}
+    assert sections == {
+        "profile",
+        "scan",
+        "browser",
+        "llm",
+        "digest",
+        "notebooklm",
+        "email",
+        "builds",
+    }
 
 
 def test_digest_html_is_sanitized():

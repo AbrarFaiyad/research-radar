@@ -60,3 +60,24 @@ sender = ""               # Gmail account that sends; empty = same as `to`
 smtp_host = "smtp.gmail.com"
 smtp_port = 587
 subject_prefix = "Research Radar"
+
+[builds]
+# Daily learning build: an AI-built demo of one digest item, made in a sandboxed Docker container
+# and published to your own GitHub repo. Off until you set `repo` and store an Anthropic API key.
+# The container sees only the item's public fields and config/field_profile.md. Network egress goes
+# through a proxy limited to `allow_hosts` (pip, GitHub, Hugging Face, docs, the Anthropic API).
+enabled = false
+mode = "with_digest"      # with_digest | separate
+separate_time = "08:30"   # used when mode = "separate"
+repo = ""                 # owner/name of the GitHub repo that receives the builds
+git_name = ""             # commit author: your GitHub noreply identity
+git_email = ""
+image = "research-radar-build:1"
+cpus = 4
+memory_gb = 8
+timeout_min = 45
+max_file_mb = 5
+max_folder_mb = 20
+claude_model = "sonnet"
+max_turns = 60
+# allow_hosts = ["pypi.org", "files.pythonhosted.org", "github.com", "api.anthropic.com"]  # replaces the default list
