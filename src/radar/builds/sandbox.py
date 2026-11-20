@@ -183,3 +183,13 @@ def run_container(argv: list[str], timeout_s: float, run=subprocess.run) -> tupl
     except FileNotFoundError:
         return 127, "docker not installed"
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def remove(name: str, run=subprocess.run) -> None:
+    """Force-remove a container; a missing one is fine."""
+    _run(run, ["docker", "rm", "-f", name], timeout=60)
+
+
+def is_running(name: str, run=subprocess.run) -> bool:
+    proc = _run(run, ["docker", "inspect", "-f", "{{.State.Running}}", name], timeout=30)
+    return proc.returncode == 0 and proc.stdout.strip() == "true"

@@ -8,15 +8,17 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import shutil
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from radar.builds import sandbox
-from radar.builds.scan import personal_markers, sanitize_png, scan_tree
+from radar.builds.scan import personal_markers, sanitize_png, scan_bytes, scan_tree
 from radar.builds.select import History, HistoryCorrupt, folder_name, pick
 
 VERIFY_TIMEOUT_S = 15 * 60
@@ -25,6 +27,8 @@ BANNER = (
     "in a clean container. Treat everything below as unverified.\n\n"
 )
 DID_NOT_RUN = "requirements did not install or the demo test did not pass"
+LINK_REASON = "link or special file in the build folder"
+DONE = ("published", "did_not_run")
 CLEAN_NAMES = (".task", "__pycache__", ".pytest_cache")
 TEMPLATE_RE = re.compile(r"\{\{(DAY|FIELD_PROFILE|ITEM_JSON)\}\}")
 
@@ -56,9 +60,18 @@ def _write_record(record: BuildRecord, digest_folder: Path, records_dir: Path) -
         data.pop("reason")
     text = json.dumps(data, indent=2)
     digest_folder.mkdir(parents=True, exist_ok=True)
-    (digest_folder / "build.json").write_text(text, encoding="utf-8")
     records_dir.mkdir(parents=True, exist_ok=True)
-    (records_dir / f"{record.day}.json").write_text(text, encoding="utf-8")
+    for path in (digest_folder / "build.json", records_dir / f"{record.day}.json"):
+        if record.status not in DONE and _has_done_record(path):
+            continue  # a later skip or failure must not hide the day's published build
+        path.write_text(text, encoding="utf-8")
+
+
+def _has_done_record(path: Path) -> bool:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("status") in DONE
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _remove(path: Path) -> None:
@@ -66,6 +79,56 @@ def _remove(path: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _has_special_entry(root: Path) -> bool:
+    """True if the folder holds a link, junction, hard link, or non-regular entry (lstat only)."""
+    junction = getattr(os.path, "isjunction", None)
+    stack = [str(root)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                entries = list(it)
+        except OSError:
+            return True
+        for e in entries:
+            try:
+                st = os.lstat(e.path)
+            except OSError:
+                return True
+            if stat.S_ISLNK(st.st_mode) or (junction and junction(e.path)):
+                return True
+            if stat.S_ISDIR(st.st_mode):
+                stack.append(e.path)
+            elif not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                return True
+    return False
+
+
+def _redact_logs(logs: Path, key: str) -> None:
+    """Remove the API key from every kept log; a log that still matches the scan is blanked."""
+    windows = {key[i : i + 16] for i in range(max(len(key) - 15, 1))} if len(key) >= 16 else set()
+    for p in logs.rglob("*"):
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+            for needle in sorted({key, *windows}, key=len, reverse=True):
+                text = text.replace(needle, "[redacted]")
+            if scan_bytes(p.name, text.encode("utf-8"), [], [key]):
+                text = "[log removed: it matched the secret scan]"
+            p.write_text(text, encoding="utf-8")
+        except OSError:
+            p.unlink(missing_ok=True)
+
+
+def _container_gone(docker, name: str) -> bool:
+    """Force-remove the container and confirm it is not running."""
+    try:
+        docker.remove(name)
+        return not docker.is_running(name)
+    except (RuntimeError, OSError):
+        return False
 
 
 def _clean_work(work: Path) -> None:
@@ -84,6 +147,12 @@ def _move_logs(work: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     _remove(dest)
     shutil.move(str(src), str(dest))
+
+
+def _has_deliverables(work: Path) -> bool:
+    readme = work / "README.md"
+    has_py = any(p.is_file() and not p.is_symlink() for p in work.rglob("*.py"))
+    return readme.is_file() and not readme.is_symlink() and has_py
 
 
 def _read_verify(work: Path) -> bool:
@@ -147,6 +216,8 @@ def run_build(
             _write_record(record, Path(digest_folder), cfg.builds_dir / "records")
         except OSError:
             log("builds: could not write the build record")
+        if status in ("blocked", "failed") and folder:
+            _remove(cfg.builds_dir / "work" / folder)  # never leave a rejected build on disk
         if cand:
             try:
                 history = History(cfg.builds_dir / "history.json")
@@ -182,9 +253,12 @@ def run_build(
     folder = folder_name(day, cand.package, cand.title)
     work = cfg.builds_dir / "work" / folder
     try:
+        profile = (cfg.root / "config" / "field_profile.md").read_text(encoding="utf-8")
         template = (cfg.root / "prompts" / "build_task.md").read_text(encoding="utf-8")
-        prompt = render_prompt(template, day, cand.item, cfg.field_profile_text())
+        prompt = render_prompt(template, day, cand.item, profile)
         _remove(work)
+        if work.exists():
+            raise OSError("stale build folder could not be removed")
         (work / ".task").mkdir(parents=True)
         (work / ".task" / "prompt.md").write_text(prompt, encoding="utf-8")
         (work / ".task" / "item.json").write_text(
@@ -204,23 +278,36 @@ def run_build(
     except (RuntimeError, OSError, ValueError):
         return finish("failed", "docker setup failed")
 
-    # The container has exited; from here the host owns the folder.
+    # The container has exited (or must be proven gone); from here the host owns the folder.
+    if not _container_gone(docker, name):
+        return finish("failed", "build container did not stop")
+    if _has_special_entry(work):
+        return finish("blocked", LINK_REASON)
     _move_logs(work, cfg.builds_dir / "logs" / folder)
+    _redact_logs(cfg.builds_dir / "logs" / folder, api_key)
+    if code == 124:
+        return finish("failed", "build timed out")
     _clean_work(work)
-    readme = work / "README.md"
-    has_py = any(p.is_file() and not p.is_symlink() for p in work.rglob("*.py"))
-    if not readme.is_file() or readme.is_symlink() or not has_py:
-        return finish(
-            "failed", "build timed out" if code == 124 else "no README.md or no Python file"
-        )
+    if not _has_deliverables(work):
+        return finish("failed", "no README.md or no Python file")
 
+    verified = False
     try:
-        docker.run_container(docker.verify_argv(cfg, work, name + "-verify"), VERIFY_TIMEOUT_S)
-        verified = _read_verify(work)
+        vcode, _out = docker.run_container(
+            docker.verify_argv(cfg, work, name + "-verify"), VERIFY_TIMEOUT_S
+        )
+        if not _container_gone(docker, name + "-verify"):
+            return finish("failed", "build container did not stop")
+        if _has_special_entry(work):
+            return finish("blocked", LINK_REASON)
+        verified = vcode != 124 and _read_verify(work)
     except (RuntimeError, OSError, ValueError):
         verified = False
     _clean_work(work)
+    if not _has_deliverables(work):
+        return finish("failed", "no README.md or no Python file")
     if not verified:
+        readme = work / "README.md"
         text = readme.read_text(encoding="utf-8", errors="replace")
         readme.write_text(BANNER + text, encoding="utf-8")
 

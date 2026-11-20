@@ -1,14 +1,16 @@
 import contextlib
 import datetime as dt
 import json
+import os
 import struct
+import sys
 import zlib
 from types import SimpleNamespace
 
 import pytest
 
 from radar.builds import run as run_mod
-from radar.builds.run import BuildRecord, render_prompt, run_build
+from radar.builds.run import render_prompt, run_build
 
 DAY = dt.date(2026, 11, 21)
 KEY = "sk-ant-api03-" + "q" * 40
@@ -41,7 +43,16 @@ def good_build(work):
     (work / "__pycache__" / "x.pyc").write_bytes(b"\x00")
 
 
-def fake_docker(*, ready=(True, ""), on_build=good_build, verify=(True, True), seen=None):
+def fake_docker(
+    *,
+    ready=(True, ""),
+    on_build=good_build,
+    on_verify=None,
+    verify=(True, True),
+    seen=None,
+    codes=(0, 0),
+    alive=False,
+):
     seen = seen if seen is not None else {}
 
     @contextlib.contextmanager
@@ -68,10 +79,12 @@ def fake_docker(*, ready=(True, ""), on_build=good_build, verify=(True, True), s
             shutil.rmtree(work / ".task")
         else:
             seen["verify_ran"] = True
+            if on_verify:
+                on_verify(work)
             (work / ".verify.json").write_text(
                 json.dumps({"installed": verify[0], "tests_passed": verify[1]}), encoding="utf-8"
             )
-        return 0, ""
+        return codes[0 if argv[0] == "build" else 1], ""
 
     return SimpleNamespace(
         docker_ready=lambda: ready,
@@ -81,6 +94,8 @@ def fake_docker(*, ready=(True, ""), on_build=good_build, verify=(True, True), s
         build_argv=lambda cfg, work, name, env_file=None: ["build", name, str(work)],
         verify_argv=lambda cfg, work, name: ["verify", name, str(work)],
         run_container=run_container,
+        remove=lambda name: None,
+        is_running=lambda name: alive,
     )
 
 
@@ -267,6 +282,9 @@ def test_one_published_build_per_day(on_cfg, digest, result, tmp_path):
     second.mkdir()
     rec = go(on_cfg, second, {"items": [item(code_url="https://github.com/o/other")]})
     assert (rec.status, rec.reason) == ("skipped", "already published today")
+    kept = json.loads((on_cfg.builds_dir / "records" / "2026-11-21.json").read_text("utf-8"))
+    assert kept["status"] == "published" and kept["url"]
+    assert json.loads((second / "build.json").read_text("utf-8"))["status"] == "skipped"
 
 
 def test_build_json_written(on_cfg, digest, result):
@@ -302,18 +320,127 @@ def test_corrupt_history_skips(on_cfg, digest, result):
     assert (rec.status, rec.reason) == ("skipped", "build history file is corrupt")
 
 
-def test_api_key_only_in_env_file(on_cfg, digest, result):
+def _tree_has(root, needle):
+    return any(
+        needle in p.read_bytes() for p in root.rglob("*") if p.is_file() and not p.is_symlink()
+    )
+
+
+def test_api_key_only_in_env_file(on_cfg, digest, result, tmp_path):
     seen = {}
     go(on_cfg, digest, result, docker=fake_docker(seen=seen))
     assert seen["key"] == KEY
 
+    def noisy(work):
+        good_build(work)
+        (work / ".logs" / "claude.log").write_text(f"env dump {KEY} end", encoding="utf-8")
 
-def test_default_publisher_is_lazy(on_cfg, digest, result):
-    # publish.py arrives in a later task; with no module the failure is recorded, not raised
+    def leak(work):
+        noisy(work)
+        (work / "out.txt").write_text(KEY, encoding="utf-8")
+
+    def broken(work):
+        (work / ".logs").mkdir()
+        (work / ".logs" / "claude.log").write_text(KEY, encoding="utf-8")
+
+    for i, fn in enumerate((noisy, leak, broken)):
+        cfg_dir = on_cfg.builds_dir
+        (cfg_dir / "history.json").unlink(missing_ok=True)
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        go(on_cfg, d, result, docker=fake_docker(on_build=fn))
+        assert not _tree_has(cfg_dir, KEY.encode()), fn.__name__
+        assert not _tree_has(d, KEY.encode())
+
+
+def test_default_publisher_is_lazy(on_cfg, digest, result, monkeypatch):
+    calls = []
+
+    def fake(cfg, work, record, markers, secrets):
+        calls.append(record.status)
+        return "https://example.test/x"
+
+    fake_mod = SimpleNamespace(publish=fake, PublishBlocked=RuntimeError)
+    monkeypatch.setitem(sys.modules, "radar.builds.publish", fake_mod)
     rec = run_build(
         on_cfg, digest, result, api_key=KEY, docker=fake_docker(), today=DAY, log=lambda *_: None
     )
-    assert isinstance(rec, BuildRecord)
+    assert calls == ["published"]
+    assert rec.url == "https://example.test/x"
+
+
+def test_build_timeout_fails_without_publish(on_cfg, digest, result):
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(codes=(124, 0)), publisher=pub)
+    assert (rec.status, rec.reason) == ("failed", "build timed out")
+    assert pub.calls == []
+
+
+def test_verify_timeout_is_not_verified(on_cfg, digest, result):
+    rec = go(on_cfg, digest, result, docker=fake_docker(codes=(0, 124)))
+    assert rec.status == "did_not_run"
+
+
+def test_container_still_alive_fails(on_cfg, digest, result):
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(alive=True), publisher=pub)
+    assert (rec.status, rec.reason) == ("failed", "build container did not stop")
+    assert pub.calls == []
+
+
+def test_field_profile_comes_from_committed_file(on_cfg, digest, result, tmp_path):
+    other = tmp_path / "private_profile.md"
+    other.write_text("PRIVATE-PROFILE-TEXT", encoding="utf-8")
+    on_cfg.field_profile = other
+    seen = {}
+    go(on_cfg, digest, result, docker=fake_docker(seen=seen))
+    assert "PRIVATE-PROFILE-TEXT" not in seen["blob"]
+    committed = (on_cfg.root / "config" / "field_profile.md").read_text(encoding="utf-8")
+    assert committed.strip().splitlines()[0] in seen["blob"]
+
+
+def _symlink(src, dst):
+    try:
+        os.symlink(src, dst)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available")
+
+
+def test_link_made_by_verify_container_blocks(on_cfg, digest, result, tmp_path):
+    target = tmp_path / "outside.txt"
+    target.write_text("outside", encoding="utf-8")
+
+    def swap(work):
+        (work / "README.md").unlink()
+        _symlink(target, work / "README.md")
+
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_verify=swap), publisher=pub)
+    assert (rec.status, rec.reason) == ("blocked", "link or special file in the build folder")
+    assert pub.calls == [] and target.read_text(encoding="utf-8") == "outside"
+
+
+def test_readme_deleted_by_verify_container_fails(on_cfg, digest, result):
+    pub = FakePublisher()
+    rec = go(
+        on_cfg,
+        digest,
+        result,
+        docker=fake_docker(on_verify=lambda w: (w / "README.md").unlink()),
+        publisher=pub,
+    )
+    assert rec.status == "failed" and pub.calls == []
+
+
+def test_stale_folder_that_cannot_be_removed_fails(on_cfg, digest, result, monkeypatch):
+    stale = on_cfg.builds_dir / "work" / "2026-11-21_mace_mace-lora-finetune"
+    stale.mkdir(parents=True)
+    (stale / "old.txt").write_text("old", encoding="utf-8")
+    monkeypatch.setattr(run_mod.shutil, "rmtree", lambda *a, **k: None)
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, publisher=pub)
+    assert (rec.status, rec.reason) == ("failed", "could not prepare the build folder")
+    assert pub.calls == []
 
 
 def test_render_prompt_braces_cannot_inject():

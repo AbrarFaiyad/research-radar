@@ -236,3 +236,12 @@ def test_build_and_verify_no_bytecode_no_home_path(cfg, tmp_path):
         assert "PYTHONDONTWRITEBYTECODE=1" in argv and "HOME=/tmp/builder" in argv
         assert "/home/" not in " ".join(argv)
     assert "-p no:cacheprovider" in verify_argv(cfg, tmp_path, "n")[-1]
+
+
+def test_remove_and_is_running():
+    rec = Recorder(lambda a: _proc(0, "true\n"))
+    sandbox.remove("c1", rec)
+    assert rec.calls[0] == ["docker", "rm", "-f", "c1"]
+    assert sandbox.is_running("c1", rec) is True
+    assert sandbox.is_running("c1", Recorder(lambda a: _proc(0, "false\n"))) is False
+    assert sandbox.is_running("c1", Recorder(lambda a: _proc(1, "", "no such"))) is False
