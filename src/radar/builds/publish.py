@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -83,8 +84,30 @@ def _prefix(cfg: Config) -> list[str]:
     return [arg for pair in pairs for arg in ("-c", pair)]
 
 
+ENV_ALLOW = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+
+
+def _gh_config_dir() -> str | None:
+    """Where the host's gh keeps its login, so the credential helper still finds it.
+
+    Only this path is handed on, never a token. gh on Windows keeps the token in Credential
+    Manager (found through the user session), elsewhere in hosts.yml inside this folder.
+    """
+    host = os.environ
+    if host.get("GH_CONFIG_DIR"):
+        cand = Path(host["GH_CONFIG_DIR"])
+    elif os.name == "nt":
+        cand = Path(host.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "GitHub CLI"
+    elif host.get("XDG_CONFIG_HOME"):
+        cand = Path(host["XDG_CONFIG_HOME"]) / "gh"
+    else:
+        cand = Path.home() / ".config" / "gh"
+    return str(cand) if cand.is_dir() else None
+
+
 def _env(tmp: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    """Git runs with an allowlisted environment: no tokens, askpass helpers or git settings."""
+    env = {k: v for k, v in os.environ.items() if k.upper() in ENV_ALLOW}
     empty = tmp / "empty.gitconfig"
     empty.write_text("", encoding="utf-8")
     home = tmp / "home"
@@ -96,7 +119,11 @@ def _env(tmp: Path) -> dict[str, str]:
         HOME=str(home),
         USERPROFILE=str(home),
         XDG_CONFIG_HOME=str(home),
+        TZ="UTC",
     )
+    gh_dir = _gh_config_dir()
+    if gh_dir:
+        env["GH_CONFIG_DIR"] = gh_dir
     return env
 
 
@@ -168,12 +195,15 @@ def _index(existing: str, new_row: str) -> str:
 
 def _verify_commit(g, cfg: Config, folder: str, markers: list[str], secrets: Sequence[str]) -> None:
     b = cfg.builds
-    out = g(["log", "-1", "--format=%an%n%ae%n%cn%n%ce"]).decode("utf-8", "replace")
-    if [x.strip() for x in out.split("\n")[:4]] != [b.git_name, b.git_email] * 2:
+    out = g(["log", "-1", "--format=%an%n%ae%n%cn%n%ce%n%ad%n%cd", "--date=raw"])
+    lines = [x.strip() for x in out.decode("utf-8", "replace").split("\n")]
+    if lines[:4] != [b.git_name, b.git_email] * 2:
+        raise PublishBlocked("commit check failed")
+    if len(lines) < 6 or not all(d.endswith(" +0000") for d in lines[4:6]):
         raise PublishBlocked("commit check failed")
     names = (
         g(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "HEAD"])
-        .decode()
+        .decode("utf-8", "replace")
         .splitlines()
     )
     if not names or any(n != "README.md" and not n.startswith(folder + "/") for n in names):
@@ -181,7 +211,7 @@ def _verify_commit(g, cfg: Config, folder: str, markers: list[str], secrets: Seq
     listing = g(["ls-tree", "-r", "-z", "HEAD", "--", folder, "README.md"])
     for entry in filter(None, listing.split(b"\0")):
         meta, _, path = entry.partition(b"\t")
-        mode, kind, sha = meta.decode().split()
+        mode, kind, sha = meta.decode("utf-8", "replace").split()
         if kind != "blob" or mode not in ("100644", "100755"):
             raise PublishBlocked("commit check failed")
         data = g(["cat-file", "blob", sha])
@@ -211,9 +241,14 @@ def publish(
     with tempfile.TemporaryDirectory(prefix="radar-git-") as td:
         env = _env(Path(td))
 
-        def g(args: list[str], cwd: Path = clone, fail: str = "git command failed") -> bytes:
+        def g(
+            args: list[str],
+            cwd: Path = clone,
+            fail: str = "git command failed",
+            extra_env: dict[str, str] | None = None,
+        ) -> bytes:
             try:
-                proc = git([*prefix, *args], cwd, env)
+                proc = git([*prefix, *args], cwd, {**env, **(extra_env or {})})
             except (OSError, subprocess.TimeoutExpired):
                 raise PublishBlocked(fail) from None
             if proc.returncode != 0:
@@ -239,6 +274,10 @@ def publish(
         has_head = probe(["rev-parse", "--verify", "--quiet", "HEAD"])
         if g(["status", "--porcelain"]).strip():
             raise PublishBlocked("clone has local changes")
+        if not has_head and probe(["rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"]):
+            # Unborn local clone, but origin already has main: adopt it.
+            g(["checkout", "--quiet", "-B", "main", "--track", "origin/main"])
+            has_head = True
         if has_head:
             branch = g(["rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
             if branch != "main" or not probe(["rev-parse", "--verify", "--quiet", "@{u}"]):
@@ -284,9 +323,11 @@ def publish(
             index_path.write_bytes(index)
 
             g(["add", "--", folder, "README.md"])
+            stamp = f"{int(time.time())} +0000"
             g(
                 ["commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", f"Build {folder}"],
                 fail="commit failed",
+                extra_env={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp},
             )
             _verify_commit(g, cfg, folder, markers, secrets)
             push = ["push", "--quiet", *([] if has_head else ["-u"]), "origin", "HEAD:main"]
@@ -297,4 +338,7 @@ def publish(
         except OSError:
             rollback()
             raise PublishBlocked("could not copy build folder") from None
+        except Exception:  # noqa: BLE001 - any unexpected failure must not leave a local commit
+            rollback()
+            raise PublishBlocked("commit check failed") from None
     return f"https://github.com/{b.repo}/tree/main/{folder}"

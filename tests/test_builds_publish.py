@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from radar.builds.publish import PublishBlocked, publish
+from radar.builds import publish as publish_mod
+from radar.builds.publish import PublishBlocked, publish, run_git
 
 NAME = "Fake Owner"
 EMAIL = "1234+fakeowner@users.noreply.github.com"
@@ -219,3 +220,64 @@ def test_first_publish_failure_leaves_clean_empty_clone(pcfg, tmp_path, origin):
 def test_bad_folder_name_blocked(pcfg, tmp_path):
     with pytest.raises(PublishBlocked, match="invalid folder name"):
         go(pcfg, work(tmp_path), rec(folder="../evil"))
+
+
+def test_commit_dates_are_utc(pcfg, tmp_path, origin, monkeypatch):
+    monkeypatch.setenv("TZ", "PST8PDT")
+    go(pcfg, work(tmp_path), rec())
+    out = sh("log", "-1", "--format=%ad|%cd", "--date=raw", "main", cwd=origin)
+    assert all(d.endswith(" +0000") for d in out.strip().split("|"))
+
+
+def test_unexpected_error_after_commit_rolls_back(pcfg, tmp_path, origin, monkeypatch):
+    go(pcfg, work(tmp_path, "a"), rec())
+    real = publish_mod.scan_bytes
+    calls = []
+
+    def flaky(*args, **kw):
+        calls.append(1)
+        if len(calls) == 2:  # first call is the index, second is a committed blob
+            raise ValueError("boom")
+        return real(*args, **kw)
+
+    monkeypatch.setattr(publish_mod, "scan_bytes", flaky)
+    with pytest.raises(PublishBlocked, match="commit check failed"):
+        go(pcfg, work(tmp_path, "b"), rec("2026-11-22"))
+    monkeypatch.setattr(publish_mod, "scan_bytes", real)
+    c = clone_of(pcfg)
+    assert sh("rev-parse", "HEAD", cwd=c) == sh("rev-parse", "main", cwd=origin)
+    assert go(pcfg, work(tmp_path, "c"), rec("2026-11-22")).endswith("2026-11-22_foo_demo")
+
+
+def test_unborn_clone_adopts_origin_main(pcfg, tmp_path, origin):
+    hook = rejecting_hook(origin)
+    with pytest.raises(PublishBlocked, match="push failed"):
+        go(pcfg, work(tmp_path, "a"), rec())
+    hook.unlink()
+    other = tmp_path / "other"
+    sh("clone", "--quiet", str(origin), str(other), cwd=tmp_path)
+    (other / "README.md").write_text("hello\n", encoding="utf-8")
+    sh("add", "README.md", cwd=other)
+    sh("-c", "user.name=o", "-c", "user.email=o@x.y", "commit", "-m", "init", cwd=other)
+    sh("push", "origin", "HEAD:main", cwd=other)
+    assert go(pcfg, work(tmp_path, "b"), rec()).endswith("2026-11-21_foo_demo")
+    assert "2026-11-21_foo_demo/demo.py" in sh("ls-tree", "-r", "--name-only", "main", cwd=origin)
+
+
+def test_git_env_is_allowlisted(pcfg, tmp_path, monkeypatch):
+    monkeypatch.setenv("SSH_ASKPASS", "evil")
+    monkeypatch.setenv("GH_TOKEN", "ghp_secretsecret")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "evil")
+    seen = []
+
+    def spy(args, cwd, env):
+        seen.append(dict(env))
+        return run_git(args, cwd, env)
+
+    go(pcfg, work(tmp_path), rec(), git=spy)
+    assert seen
+    for env in seen:
+        assert not {"SSH_ASKPASS", "GH_TOKEN", "GIT_SSH_COMMAND"} & set(env)
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["TZ"] == "UTC"
