@@ -36,7 +36,9 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.329
       - name: Drop passwordless sudo
-        run: sudo rm -f /etc/sudoers.d/runner
+        run: |
+          sudo systemctl stop docker.socket docker.service || true
+          sudo rm -f /etc/sudoers.d/runner
       - name: Validate folder name
         env:
           FOLDER: ${{ inputs.folder }}
@@ -82,40 +84,80 @@ jobs:
           mkdir -p /tmp/out/work
           find /tmp/out/work \( -name __pycache__ -o -name .ipynb_checkpoints -o -name .venv -o -name .git \) \
             -prune -exec rm -rf {} +
+      # Known limit: a background process started during the build could still write
+      # into work after this step runs. The publish job's scan, the 1-day retention
+      # and the artifact deletion in the cleanup job are the remaining guards.
       - name: Tripwire for the API key
+        id: tripwire
         if: always()
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           mkdir -p /tmp/out/work
-          python3 - <<'PY'
-          import base64, json, os, shutil
-          key = os.environ.get("ANTHROPIC_API_KEY", "").strip().encode()
+          /usr/bin/python3 -I - <<'PY'
+          import base64, json, os, stat
+
+          CAP = 5 * 1024 * 1024
+          MAX_FILES = 2000
           out = "/tmp/out"
+          key = os.environ.get("ANTHROPIC_API_KEY", "").strip().encode()
           forms = set()
           if len(key) >= 8:
               forms |= {key, key.hex().encode(), key.hex().upper().encode()}
               for off, skip in ((0, 0), (1, 2), (2, 3)):
                   padded = b"\x00" * off + key
                   for enc in (base64.b64encode(padded), base64.urlsafe_b64encode(padded)):
-                      forms.add(enc[skip:-2])
-          hit = False
-          for root, _dirs, files in os.walk(out):
-              for name in files:
-                  with open(os.path.join(root, name), "rb") as fh:
-                      data = fh.read()
-                  squashed = b"".join(data.split())
-                  if any(f in data or f in squashed for f in forms):
-                      hit = True
+                      # the last characters mix key bits with whatever follows the key
+                      forms.add(enc.rstrip(b"=")[skip:-2])
+
+
+          def tripped():
+              if stat.S_ISLNK(os.lstat(out).st_mode):
+                  return True
+              count = 0
+              for root, dirs, files in os.walk(out, followlinks=False, onerror=lambda e: 1 / 0):
+                  for name in dirs + files:
+                      mode = os.lstat(os.path.join(root, name)).st_mode
+                      if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                          return True
+                  for name in files:
+                      count += 1
+                      path = os.path.join(root, name)
+                      if count > MAX_FILES or os.lstat(path).st_size > CAP:
+                          return True
+                      with open(path, "rb") as fh:
+                          data = fh.read(CAP + 1)
+                      squashed = b"".join(data.split())
+                      if any(f in data or f in squashed for f in forms):
+                          return True
+              return False
+
+
+          def wipe(path):
+              if stat.S_ISDIR(os.lstat(path).st_mode):
+                  os.chmod(path, 0o700)
+                  for name in os.listdir(path):
+                      wipe(os.path.join(path, name))
+                  os.rmdir(path)
+              else:
+                  os.unlink(path)
+
+
+          try:
+              hit = tripped()
+          except Exception:
+              hit = True
           if hit:
-              shutil.rmtree(os.path.join(out, "work"), ignore_errors=True)
+              os.chmod(out, 0o700)
+              for name in os.listdir(out):
+                  wipe(os.path.join(out, name))
               os.makedirs(os.path.join(out, "work"))
               with open(os.path.join(out, "status.json"), "w") as fh:
                   json.dump({"ran": False, "blocked": True}, fh)
           print("tripwire:", "hit" if hit else "clean")
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
+        if: always() && steps.tripwire.outcome == 'success'
         with:
           name: build
           path: /tmp/out
@@ -128,7 +170,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      actions: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4.9.1
@@ -144,8 +185,16 @@ jobs:
         run: python tools/publish_build.py --folder "$FOLDER" --src "$RUNNER_TEMP/artifact"
       - name: Push
         run: git push
+
+  cleanup:
+    needs: [build, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
       - name: Delete the artifact
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

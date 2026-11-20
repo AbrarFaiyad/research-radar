@@ -49,7 +49,8 @@ def test_workflow_triggers_and_concurrency():
 def test_workflow_permissions_and_secret_scope():
     wf = _wf()
     assert wf["jobs"]["build"]["permissions"] == {"contents": "read"}
-    assert wf["jobs"]["publish"]["permissions"] == {"contents": "write", "actions": "write"}
+    assert wf["jobs"]["publish"]["permissions"] == {"contents": "write"}
+    assert wf["jobs"]["cleanup"]["permissions"] == {"actions": "write"}
     for job in wf["jobs"].values():
         assert "secrets." not in json.dumps(job.get("env", {}))
     assert wf["jobs"]["publish"]["needs"] == "build"
@@ -97,20 +98,28 @@ def test_artifact_is_short_lived_and_visible_files_only():
     up = next(s for s in steps if "upload-artifact" in s.get("uses", ""))
     assert up["with"]["retention-days"] == 1 and up["with"]["path"] == "/tmp/out"
     assert steps.index(up) > _index("Tripwire for the API key")
-    assert steps[_index("Tripwire for the API key")]["if"] == "always()"
+    trip = steps[_index("Tripwire for the API key")]
+    assert trip["if"] == "always()" and trip["id"] == "tripwire"
+    assert up["if"] == "always() && steps.tripwire.outcome == 'success'"
+    assert "/usr/bin/python3 -I -" in trip["run"]
 
 
-def test_publish_deletes_artifact_and_reads_it_from_runner_temp():
+def test_publish_reads_artifact_from_runner_temp():
     steps = _wf()["jobs"]["publish"]["steps"]
-    delete = next(s for s in steps if s.get("name") == "Delete the artifact")
-    assert delete["if"] == "always()" and "-X DELETE" in delete["run"]
-    assert delete["env"] == {"GH_TOKEN": "${{ github.token }}"}
-    tool = max(i for i, s in enumerate(steps) if "publish_build" in s.get("run", ""))
-    assert steps.index(delete) > tool
+    assert not any("DELETE" in s.get("run", "") for s in steps)
     dl = next(s for s in steps if "download-artifact" in s.get("uses", ""))
     assert dl["with"]["path"] == "${{ runner.temp }}/artifact"
     assert '--src "$RUNNER_TEMP/artifact"' in "".join(s.get("run", "") for s in steps)
     assert _wf()["jobs"]["publish"]["timeout-minutes"] == 10
+
+
+def test_cleanup_job_deletes_artifacts_even_when_cancelled():
+    job = _wf()["jobs"]["cleanup"]
+    assert job["needs"] == ["build", "publish"] and job["if"] == "always()"
+    assert job["permissions"] == {"actions": "write"}
+    (step,) = job["steps"]
+    assert "-X DELETE" in step["run"] and step["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert "secrets." not in json.dumps(job)
 
 
 def test_untrusted_code_runs_outside_home_runner_without_sudo():
@@ -125,26 +134,40 @@ def test_untrusted_code_runs_outside_home_runner_without_sudo():
     sudo = next(
         i for i, s in enumerate(steps) if "sudo rm -f /etc/sudoers.d/runner" in s.get("run", "")
     )
+    drop = steps[sudo]["run"]
+    assert drop.index("systemctl stop docker.socket docker.service") < drop.index("sudo rm -f")
     assert sudo < _index("Build with Claude") < _index("Run the notebook")
     assert "> /tmp/claude.log" in steps[_index("Build with Claude")]["run"]
 
 
-def _tripwire(tmp_path, key, content):
+def _tripwire(tmp_path, key, setup):
     run = _build_steps()[_index("Tripwire for the API key")]["run"]
     code = run.split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]  # YAML already dedented it
-    code = code.replace("/tmp/out", str(tmp_path / "out").replace("\\", "/"))
-    (tmp_path / "out" / "work").mkdir(parents=True)
-    (tmp_path / "out" / "status.json").write_text('{"ran": true}')
-    (tmp_path / "out" / "work" / "demo.ipynb").write_bytes(content)
+    out = tmp_path / "out"
+    code = code.replace("/tmp/out", str(out).replace("\\", "/"))
+    (out / "work").mkdir(parents=True)
+    (out / "status.json").write_text('{"ran": true}')
+    setup(out / "work")
     env = {**os.environ, "ANTHROPIC_API_KEY": key}
     subprocess.run([sys.executable, "-I", "-c", code], env=env, check=True, capture_output=True)
-    return json.loads((tmp_path / "out" / "status.json").read_text()), tmp_path / "out" / "work"
+    return json.loads((out / "status.json").read_text()), out / "work"
+
+
+KEY = "sk-ant-api03-Zq9" + "k3Lm2" * 6
+
+
+def _put(content):
+    return lambda work: (work / "demo.ipynb").write_bytes(content)
+
+
+def _assert_blocked(status, work):
+    assert status == {"ran": False, "blocked": True}
+    assert work.is_dir() and list(work.iterdir()) == []
 
 
 @pytest.mark.parametrize("form", ["raw", "hex", "b64-0", "b64-1", "b64-2", "wrapped"])
 def test_tripwire_catches_key_forms(tmp_path, form):
-    key = "sk-ant-api03-Zq9" + "k3Lm2" * 6
-    kb = key.encode()
+    kb = KEY.encode()
     b64 = base64.b64encode(kb)
     blob = {
         "raw": kb,
@@ -154,15 +177,75 @@ def test_tripwire_catches_key_forms(tmp_path, form):
         "b64-2": base64.b64encode(b"ab" + kb),
         "wrapped": b"\n".join(b64[i : i + 12] for i in range(0, len(b64), 12)),
     }[form]
-    status, work = _tripwire(tmp_path, key, b"xx " + blob + b" yy")
-    assert status == {"ran": False, "blocked": True}
-    assert list(work.iterdir()) == []
+    _assert_blocked(*_tripwire(tmp_path, KEY, _put(b"xx " + blob + b" yy")))
+
+
+@pytest.mark.parametrize("urlsafe", [False, True])
+@pytest.mark.parametrize("before", [0, 1, 2])
+@pytest.mark.parametrize("length", [40, 41, 42, 77, 120])
+def test_tripwire_catches_key_with_bytes_on_both_sides(tmp_path, length, before, urlsafe):
+    key = ("sk-ant-api03-" + "Zq9k3Lm2Xy7" * 12)[:length]
+    enc = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+    blob = enc(b"\xfb" * before + key.encode() + b"\xff\xfe\xfd")
+    _assert_blocked(*_tripwire(tmp_path, key, _put(b'{"v": "' + blob + b'"}')))
 
 
 def test_tripwire_leaves_clean_output(tmp_path):
-    status, work = _tripwire(tmp_path, "sk-ant-api03-secretsecretsecret", b"hello")
+    status, work = _tripwire(tmp_path, KEY, _put(b"hello"))
     assert status == {"ran": True}
     assert (work / "demo.ipynb").exists()
+
+
+def test_tripwire_fails_closed_on_dangling_symlink(tmp_path):
+    def setup(work):
+        try:
+            os.symlink(tmp_path / "missing", work / "dangling")
+        except OSError:
+            pytest.skip("symlinks not permitted")
+
+    _assert_blocked(*_tripwire(tmp_path, KEY, setup))
+
+
+def test_tripwire_fails_closed_on_symlink_to_outside_file(tmp_path):
+    (tmp_path / "outside.txt").write_text("hello")
+
+    def setup(work):
+        try:
+            os.symlink(tmp_path / "outside.txt", work / "link.txt")
+        except OSError:
+            pytest.skip("symlinks not permitted")
+
+    _assert_blocked(*_tripwire(tmp_path, KEY, setup))
+
+
+def test_tripwire_fails_closed_on_oversize_file(tmp_path):
+    _assert_blocked(*_tripwire(tmp_path, KEY, _put(b"a" * (5 * 1024 * 1024 + 1))))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_tripwire_fails_closed_on_unreadable_file(tmp_path):
+    def setup(work):
+        (work / "secret.txt").write_text("x")
+        (work / "secret.txt").chmod(0)
+
+    if os.geteuid() == 0:
+        pytest.skip("root reads mode-000 files")
+    _assert_blocked(*_tripwire(tmp_path, KEY, setup))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_tripwire_fails_closed_on_fifo(tmp_path):
+    _assert_blocked(*_tripwire(tmp_path, KEY, lambda work: os.mkfifo(work / "pipe")))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_tripwire_wipes_read_only_subfolder(tmp_path):
+    def setup(work):
+        (work / "sub").mkdir()
+        (work / "sub" / "f.txt").write_text(KEY)
+        (work / "sub").chmod(0o500)
+
+    _assert_blocked(*_tripwire(tmp_path, KEY, setup))
 
 
 def test_build_job_does_not_check_out_the_repo():
