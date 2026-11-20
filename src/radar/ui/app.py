@@ -3,11 +3,15 @@
 Security model: the server binds to 127.0.0.1 only. Every request must carry a loopback Host
 header (blocks DNS-rebinding pages), and every state-changing request must carry the per-launch
 token in `X-Radar-Token` plus a same-origin `Origin` (blocks other websites posting to the
-panel). The panel never sees passwords.
+panel). Site passwords (LinkedIn, Google) are typed only into the agent browser. The Gmail App
+Password may be typed into the panel; it goes straight to the OS credential store and is never
+returned, logged, or written to disk by the app.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import secrets
@@ -17,9 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from .. import __version__, settings
+from .. import __version__, onboard, settings
 from ..config import Config, load_config
 from ..db import Store
 from ..pipeline import RunLock, latest_run
@@ -103,7 +107,19 @@ def create_app(
             raise HTTPException(409, f"a {holder.get('owner')} run is already active")
         extra = []
         if action == "scan" and payload.get("max_posts"):
-            extra = ["--max-posts", str(int(payload["max_posts"]))]
+            extra = ["--max-posts", str(_bounded_int(payload["max_posts"], 1, 300))]
+        if action == "digest" and payload.get("no_audio"):
+            extra = ["--no-audio"]
+        if action == "onboard-calibrate":
+            source = payload.get("source", "live")
+            if source not in onboard.SOURCES:
+                raise HTTPException(400, "source must be live or stored")
+            extra = [
+                "--source",
+                source,
+                "--max-posts",
+                str(_bounded_int(payload.get("max_posts", 40), 5, 150)),
+            ]
         if action in ("podcast", "email") and payload.get("folder"):
             if not _DIGEST_NAME.match(str(payload["folder"])):
                 raise HTTPException(400, "bad digest name")
@@ -112,6 +128,16 @@ def create_app(
             return runner.start(action, extra).summary()
         except JobBusy as e:
             raise HTTPException(409, str(e)) from None
+
+    @app.get("/api/runs")
+    def runs(limit: int = 20) -> list[dict]:
+        out = []
+        for path in sorted((fresh().data_dir / "runs").glob("*.json"), reverse=True)[:limit]:
+            try:
+                out.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+        return out
 
     @app.get("/api/jobs/log")
     def job_log(since: int = 0) -> dict:
@@ -165,6 +191,137 @@ def create_app(
         tmp.replace(path)
         return {"saved": True, "chars": len(text)}
 
+    # ---- onboarding -----------------------------------------------------------------------
+    def wizard_idle() -> None:
+        """Wizard edits wait for a running wizard job, so its result cannot overwrite them."""
+        job = runner.current
+        if job and job.running and job.action.startswith("onboard"):
+            raise HTTPException(409, f"wait for {job.action} to finish")
+
+    @app.get("/api/onboarding")
+    def get_onboarding() -> dict:
+        c = fresh()
+        store = Store(c.db_path)
+        try:
+            stored = sum(store.stats().values())
+        finally:
+            store.close()
+        state = onboard.load_state(c)
+        return {
+            "state": state,
+            # a fresh install: nothing scanned yet and no profile applied through the wizard
+            "first_run": stored == 0 and not state.get("applied_at"),
+            "stored_posts": stored,
+            "reader": c.profile.reader,
+            "profile": c.field_profile_text() if c.field_profile.exists() else "",
+        }
+
+    @app.post("/api/onboarding/cv")
+    def upload_cv(payload: dict = Body(...)) -> dict:
+        wizard_idle()
+        try:
+            data = base64.b64decode(str(payload.get("data", "")), validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, "file data is not valid base64") from None
+        c = fresh()
+        try:
+            cv = onboard.save_cv(c, str(payload.get("filename", "")), data)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        state = onboard.load_state(c)
+        state["cv"] = cv
+        onboard.save_state(c, state)
+        return {"cv": cv}
+
+    @app.post("/api/onboarding/cv/remove")
+    def remove_cv() -> dict:
+        wizard_idle()
+        c = fresh()
+        onboard.remove_cv(c)
+        state = onboard.load_state(c)
+        state["cv"] = None
+        onboard.save_state(c, state)
+        return {"cv": None}
+
+    @app.post("/api/onboarding/notes")
+    def save_notes(payload: dict = Body(...)) -> dict:
+        wizard_idle()
+        notes = str(payload.get("notes", ""))
+        drafter = payload.get("drafter", "codex")
+        if len(notes) > 8000:
+            raise HTTPException(400, "description is too long (8000 characters max)")
+        if drafter not in onboard.DRAFTERS:
+            raise HTTPException(400, "drafter must be codex or local")
+        c = fresh()
+        state = onboard.load_state(c)
+        state.update(notes=notes, drafter=drafter)
+        onboard.save_state(c, state)
+        return {"saved": True}
+
+    @app.post("/api/onboarding/edit")
+    def edit_onboarding(payload: dict = Body(...)) -> dict:
+        """Keep the user's edits to the draft before testing it on posts."""
+        wizard_idle()
+        reader = " ".join(str(payload.get("reader", "")).split())
+        profile = str(payload.get("profile", "")).replace("\r\n", "\n")
+        if not reader or not profile.strip():
+            raise HTTPException(400, "reader and profile are both required")
+        if len(profile) > onboard.PROFILE_MAX_CHARS or len(reader) > 300:
+            raise HTTPException(400, "profile or reader is too long")
+        c = fresh()
+        state = onboard.load_state(c)
+        key = "refined" if state.get("refined") else "draft"
+        state[key] = {**(state.get(key) or {}), "reader": reader, "profile": profile}
+        onboard.save_state(c, state)
+        return {"saved": key}
+
+    @app.post("/api/onboarding/corrections")
+    def corrections(payload: dict = Body(...)) -> dict:
+        raw = payload.get("corrections", {})
+        if not isinstance(raw, dict):
+            raise HTTPException(400, "corrections must be an object")
+        wizard_idle()
+        return {"corrections": onboard.set_corrections(fresh(), raw)}
+
+    @app.post("/api/onboarding/apply")
+    def apply_onboarding(payload: dict = Body(...)) -> dict:
+        wizard_idle()
+        c = fresh()
+        try:
+            backup = onboard.apply_profile(
+                c, str(payload.get("reader", "")), str(payload.get("profile", ""))
+            )
+        except settings.SettingsError as e:
+            raise HTTPException(
+                400, f"reader {e.errors.get('profile.reader', 'is invalid')}"
+            ) from None
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return {"applied": True, "backup": backup.name if backup else None}
+
+    @app.post("/api/onboarding/reset")
+    def reset_onboarding() -> dict:
+        wizard_idle()
+        c = fresh()
+        onboard.remove_cv(c)
+        onboard.save_state(c, onboard.empty_state())
+        return {"reset": True}
+
+    # ---- email password -------------------------------------------------------------------
+    @app.post("/api/email/password")
+    def email_password(payload: dict = Body(...)) -> dict:
+        from ..mailer import set_password
+
+        c = fresh()
+        user = c.email.sender or c.email.to
+        if not user or user.endswith("example.com"):
+            raise HTTPException(400, "set the email address in Settings first")
+        pw = "".join(str(payload.get("password", "")).split())
+        if not 8 <= len(pw) <= 64:
+            raise HTTPException(400, "a Gmail App Password is 16 letters")
+        set_password(user, pw)
+        return {"saved": True}
+
     # ---- queue ----------------------------------------------------------------------------
     @app.get("/api/queue")
     def get_queue(all: bool = False) -> list[dict]:
@@ -173,6 +330,22 @@ def create_app(
             return queue_records(store, include_done=all)
         finally:
             store.close()
+
+    @app.get("/api/queue.csv")
+    def queue_csv(all: bool = False) -> Response:
+        """Built in memory: a GET must not rewrite the queue files the daily email attaches."""
+        from ..queue import csv_text
+
+        store = Store(fresh().db_path)
+        try:
+            body = csv_text(queue_records(store, include_done=all))
+        finally:
+            store.close()
+        return Response(
+            body.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="connect_queue.csv"'},
+        )
 
     @app.post("/api/queue/mark")
     def mark(payload: dict = Body(...)) -> dict:
@@ -254,6 +427,14 @@ def create_app(
     return app
 
 
+def _bounded_int(value: Any, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"must be a whole number from {lo} to {hi}") from None
+    return min(max(n, lo), hi)
+
+
 _AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
 _BAD_HREF = re.compile(r'href="\s*(javascript|data|vbscript):[^"]*"', re.IGNORECASE)
 
@@ -271,10 +452,19 @@ def safe_markdown(md: str) -> str:
 
 
 def serve(cfg: Config, port: int = 8765, open_browser: bool = True) -> None:
+    import httpx
     import uvicorn
 
-    app = create_app(cfg, port=port)
     url = f"http://127.0.0.1:{port}/"
+    try:  # already running (e.g. the shortcut was clicked twice): just open it
+        if httpx.get(url + "api/status", timeout=1.5).json().get("version"):
+            print(f"Research Radar is already running: {url}")
+            if open_browser:
+                webbrowser.open(url)
+            return
+    except (httpx.HTTPError, ValueError):
+        pass
+    app = create_app(cfg, port=port)
     print(f"Research Radar control panel: {url}  (Ctrl+C to stop)")
     if open_browser:
         webbrowser.open(url)

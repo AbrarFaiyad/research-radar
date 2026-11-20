@@ -22,6 +22,15 @@ ACTIONS: dict[str, list[str]] = {
     "demo": ["demo"],
     "login": ["login"],
     "notebooklm-login": ["notebooklm-login"],
+    "onboard-draft": ["onboard", "draft"],
+    "onboard-calibrate": ["onboard", "calibrate"],
+    "onboard-refine": ["onboard", "refine"],
+    "setup-config": ["setup", "config"],
+    "setup-model": ["setup", "model"],
+    "setup-chromium": ["setup", "chromium"],
+    "setup-codex": ["setup", "codex"],
+    "setup-codex-login": ["setup", "codex-login"],
+    "email-test": ["email", "--test"],
 }
 
 

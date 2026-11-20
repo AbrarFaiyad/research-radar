@@ -25,6 +25,7 @@ class Check:
     detail: str
     fix: str = ""
     required: bool = True
+    action: str = ""  # panel fix: a job action, "email-password", "schedule", or a URL
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -69,6 +70,7 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
             str(cfg_file) if cfg_file.exists() else "using config.example.toml defaults",
             "Copy-Item config/config.example.toml config/config.toml",
             required=False,
+            action="setup-config",
         )
     )
     out.append(
@@ -77,6 +79,7 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
             cfg.field_profile.exists(),
             str(cfg.field_profile),
             "create config/field_profile.md describing your field",
+            action="onboard",
         )
     )
 
@@ -91,6 +94,7 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
                 has,
                 cfg.llm.model if has else f"{cfg.llm.model} not pulled",
                 f"ollama pull {cfg.llm.model}",
+                action="setup-model",
             )
         )
     except (httpx.HTTPError, ValueError, KeyError, OSError):
@@ -100,15 +104,20 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
                 False,
                 f"not reachable at {cfg.llm.host}",
                 "start the Ollama app (winget install Ollama.Ollama)",
+                action="https://ollama.com/download",
             )
         )
 
-    for exe, fix in (
-        (cfg.digest.codex_command, "npm install -g @openai/codex, then codex login"),
-        (cfg.browser.mcp_command, "winget install OpenJS.NodeJS.LTS"),
+    for exe, fix, action in (
+        (cfg.digest.codex_command, "npm install -g @openai/codex, then codex login", "setup-codex"),
+        (
+            cfg.browser.mcp_command,
+            "winget install OpenJS.NodeJS.LTS",
+            "https://nodejs.org/en/download",
+        ),
     ):
         path = p.which(exe)
-        out.append(Check(f"{exe} on PATH", bool(path), path or "not found", fix))
+        out.append(Check(f"{exe} on PATH", bool(path), path or "not found", fix, action=action))
 
     chromium = p.playwright_dir.is_dir() and any(p.playwright_dir.glob("chromium-*"))
     out.append(
@@ -117,17 +126,28 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
             chromium,
             str(p.playwright_dir),
             "npx -y playwright@1.65.0-alpha-2026-10-30 install chromium",
+            action="setup-chromium",
         )
     )
     out.append(
         Check(
-            "LinkedIn login", _dir_has_files(cfg.profile_dir), str(cfg.profile_dir), "radar login"
+            "LinkedIn login",
+            _dir_has_files(cfg.profile_dir),
+            str(cfg.profile_dir),
+            "radar login",
+            action="login",
         )
     )
     if cfg.notebooklm.enabled:
         google = cfg.data_dir / "browser-profile-google"
         out.append(
-            Check("NotebookLM login", _dir_has_files(google), str(google), "radar notebooklm-login")
+            Check(
+                "NotebookLM login",
+                _dir_has_files(google),
+                str(google),
+                "radar notebooklm-login",
+                action="notebooklm-login",
+            )
         )
     if cfg.email.enabled:
         user = cfg.email.sender or cfg.email.to
@@ -138,6 +158,7 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
                 has_pw,
                 user or "no recipient set",
                 "set [email] to in config.toml, then radar email-setup",
+                action="email-password",
             )
         )
     out.append(
@@ -147,6 +168,7 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
             TASK_NAME,
             "powershell -ExecutionPolicy Bypass -File scripts\\install_schedule.ps1 -Time 07:00",
             required=False,
+            action="schedule",
         )
     )
     for c in out:

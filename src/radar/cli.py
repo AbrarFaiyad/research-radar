@@ -1,8 +1,11 @@
 """Research Radar command line.
 
 Pipeline:  scan | reclassify | digest | podcast | email | daily
-Setup:     login | notebooklm-login | email-setup | doctor
+Setup:     onboard | setup | login | notebooklm-login | email-setup | doctor
 Inspect:   status | queue | demo | ui
+
+Everything here also has a button in the control panel (`radar ui`); the panel runs these
+commands as subprocesses, and so does the daily scheduled task.
 """
 
 from __future__ import annotations
@@ -123,11 +126,23 @@ def stage_podcast(cfg: Config, folder_name: str | None = None) -> dict:
     return {"folder": folder.name, "audio": out.name}
 
 
-def stage_email(cfg: Config, folder_name: str | None = None, today_only: bool = False) -> dict:
-    from .mailer import compose_daily, send
+def stage_email(
+    cfg: Config, folder_name: str | None = None, today_only: bool = False, test: bool = False
+) -> dict:
+    from .mailer import build_message, compose_daily, send
 
     if not cfg.email.to or cfg.email.to.endswith("example.com"):
-        raise UserError("Set [email] to in config/config.toml first.")
+        raise UserError("Set the email address in Settings (or [email] to in config.toml) first.")
+    if test:
+        msg = build_message(
+            cfg.email,
+            f"{cfg.email.subject_prefix}: test email",
+            "Research Radar can send you email. The daily digest will arrive like this.",
+            [],
+        )
+        send(cfg.email, msg)
+        print(f"test email sent to {cfg.email.to}")
+        return {"attachments": []}
     folder = cfg.digests_dir / folder_name if folder_name else _latest_digest(cfg, today_only)
     msg = compose_daily(cfg.email, folder, cfg.queue_dir)
     send(cfg.email, msg)
@@ -176,7 +191,91 @@ def cmd_podcast(cfg, args) -> int:
 
 
 def cmd_email(cfg, args) -> int:
-    return _locked(cfg, "email", lambda: stage_email(cfg, args.folder, args.today_only))
+    return _locked(cfg, "email", lambda: stage_email(cfg, args.folder, args.today_only, args.test))
+
+
+def cmd_onboard(cfg, args) -> int:
+    from . import onboard
+
+    def draft():
+        onboard.draft_profile(cfg)
+
+    def calibrate():
+        from .scanner import collect_live, stored_posts
+
+        state = onboard.load_state(cfg)
+        prof = onboard.current_profile(state)
+        if not prof:
+            raise UserError("Draft a profile first.")
+        if args.source == "stored":
+            store = Store(cfg.db_path)
+            try:
+                posts = stored_posts(store, args.max_posts)
+            finally:
+                store.close()
+            print(f"calibrating on {len(posts)} stored posts")
+        else:
+            cfg.scan.max_posts = args.max_posts
+            print(f"reading up to {args.max_posts} posts from the feed (nothing is saved)")
+            posts = asyncio.run(collect_live(cfg))
+        classify = Classifier(_model(cfg), prof["profile"])
+        onboard.calibrate(cfg, posts, classify, args.source)
+
+    def refine():
+        onboard.refine_profile(cfg)
+
+    step = {"draft": draft, "calibrate": calibrate, "refine": refine}[args.step]
+    try:
+        return _locked(cfg, f"onboard-{args.step}", step)
+    except ValueError as e:
+        raise UserError(str(e)) from None
+
+
+PLAYWRIGHT_VERSION = "1.65.0-alpha-2026-10-30"
+
+
+def _stream(argv: list[str]) -> int:
+    """Run a setup tool and pass its output through line by line (the panel log shows it)."""
+    import subprocess
+
+    exe = shutil.which(argv[0])
+    if exe is None:
+        raise UserError(f"{argv[0]} is not installed or not on PATH.")
+    print("$", " ".join(argv), flush=True)
+    proc = subprocess.Popen(
+        [exe, *argv[1:]],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout
+    for line in proc.stdout:
+        print(line.rstrip(), flush=True)
+    return proc.wait()
+
+
+def cmd_setup(cfg, args) -> int:
+    root = cfg.root
+    if args.what == "config":
+        target = root / "config" / "config.toml"
+        if target.exists():
+            print(f"{target.name} already exists; nothing to do")
+            return 0
+        shutil.copyfile(root / "config" / "config.example.toml", target)
+        print(f"created {target.relative_to(root)} from the example")
+        return 0
+    commands = {
+        "model": ["ollama", "pull", cfg.llm.model],
+        "chromium": ["npx", "-y", f"playwright@{PLAYWRIGHT_VERSION}", "install", "chromium"],
+        "codex": ["npm", "install", "-g", "@openai/codex"],
+        "codex-login": [cfg.digest.codex_command, "login"],
+    }
+    code = _stream(commands[args.what])
+    print("done" if code == 0 else f"failed with exit code {code}")
+    return code
 
 
 def cmd_daily(cfg, args) -> int:
@@ -314,6 +413,13 @@ def build_parser() -> argparse.ArgumentParser:
     em = sub.add_parser("email", help="email the latest digest, queue, and podcast to yourself")
     em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     em.add_argument("--today-only", action="store_true", help="skip digests from earlier days")
+    em.add_argument("--test", action="store_true", help="send a short test message only")
+    ob = sub.add_parser("onboard", help="set up the field profile from a CV (the panel's wizard)")
+    ob.add_argument("step", choices=["draft", "calibrate", "refine"])
+    ob.add_argument("--source", choices=["live", "stored"], default="live")
+    ob.add_argument("--max-posts", type=int, default=40)
+    st = sub.add_parser("setup", help="install or sign in to a prerequisite")
+    st.add_argument("what", choices=["config", "model", "chromium", "codex", "codex-login"])
     sub.add_parser("daily", help="scan, digest, email; isolated stages and a run record")
     sub.add_parser("doctor", help="check that every prerequisite is installed and signed in")
     ui = sub.add_parser("ui", help="open the local control panel")
@@ -333,6 +439,8 @@ HANDLERS = {
     "podcast": cmd_podcast,
     "notebooklm-login": cmd_notebooklm_login,
     "email-setup": cmd_email_setup,
+    "onboard": cmd_onboard,
+    "setup": cmd_setup,
     "email": cmd_email,
     "daily": cmd_daily,
     "doctor": cmd_doctor,

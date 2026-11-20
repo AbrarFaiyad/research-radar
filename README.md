@@ -6,9 +6,9 @@
 
 Keeping up with new research takes time, and a LinkedIn feed mixes real results with announcements, ads, and personal news. Research Radar reads the feed for you each morning, keeps the work that matters to your field, finds the primary sources, and delivers a written digest and a two-host podcast to your inbox. It also lists the researchers behind that work, so you can connect with them and make your feed better over time.
 
-The repository ships configured for computational materials science. To use it for another field, edit one profile file and one line of settings.
+Everything runs from a local control panel. A setup wizard reads your CV, drafts a profile of your field, tests it on real posts from your feed, and refines it from your corrections, so the tool works for any field. The repository's own profile is set up for computational materials science.
 
-Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [Installation](#installation) · [Usage](#usage) · [Engineering](#engineering)
+Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [Installation](#installation) · [Command line](#command-line-reference) · [Engineering](#engineering)
 
 ![Control panel dashboard](docs/images/panel-dashboard.png)
 
@@ -19,8 +19,9 @@ Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [In
 - Sends every saved post to Codex, which keeps the 5 to 15 items with real impact, finds their primary sources and related coverage, and writes the digest.
 - Turns the digest into a NotebookLM Audio Overview, a two-host podcast.
 - Emails the digest, queue, and podcast to the owner each day.
-- Gives you a local control panel to run any step, change settings and the schedule, and work through the queue and past digests.
-- Checks its own setup with `radar doctor` and records every daily run, stage by stage.
+- Sets itself up from the control panel: a wizard builds your field profile from a CV, and every missing prerequisite has a fix button.
+- Lets you run any step, change settings and the schedule, and work through the queue and past digests, all from the panel.
+- Checks its own setup and records every daily run, stage by stage.
 
 ## Architecture
 
@@ -81,8 +82,9 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
 | Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
 | Settings | `src/radar/settings.py` | Typed, validated schema over `config/config.toml` |
+| Onboarding | `src/radar/onboard.py` | CV reading and redaction, profile draft, calibration, refinement |
 | Control panel | `src/radar/ui/` | FastAPI app and single-page interface behind `radar ui` |
-| Command line | `src/radar/cli.py` | Entry point for every command |
+| Command line | `src/radar/cli.py` | Engine behind every panel button and the scheduled task |
 
 ## Design decisions
 
@@ -100,20 +102,26 @@ The repository ignores `data/`, which contains feed records and the browser prof
 
 ## Control panel
 
-```powershell
-radar ui
-```
-
-This opens a local web page at `http://127.0.0.1:8765`. Only your own computer can reach it.
+Open it with the **Research Radar** shortcut on the desktop or in the Start menu. It is a local web page at `http://127.0.0.1:8765` that only your own computer can reach. Opening the shortcut again while the panel runs just brings the page back.
 
 | Tab | What you can do |
 |---|---|
-| Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the last run's stages. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
+| Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the run history with each stage's result. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
+| Setup | Build your field profile with the wizard (below). Work through a checklist of prerequisites, each with a button that fixes it: create the config, download the local model, install the agent browser and Codex, sign in to Codex, LinkedIn, and NotebookLM. Store the Gmail App Password and send a test email. |
 | Schedule | Change the daily run time or switch it off. |
 | Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
 | Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
-| Connection queue | Open each profile, then mark it Sent, Skip, or back to Todo. |
-| Digests | Read past digests, play their podcasts, and open their NotebookLM notebooks. |
+| Connection queue | Open each profile, then mark it Sent, Skip, or back to Todo. Download the list as CSV. |
+| Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, or email a digest again. |
+
+### Setup wizard
+
+1. **About you.** Drop in a CV (PDF, DOCX, TXT, or MD), describe your field in a few sentences, or both. Email addresses, phone numbers, and profile links are removed before any model reads the text. You choose who drafts: Codex, which writes better profiles but sends the text to OpenAI, or the local model, which keeps it on your computer.
+2. **Draft.** The model writes a field profile, listing named methods, tools, datasets, and groups under Core, Adjacent, and Skip, plus a one-line description of the reader. Edit both freely.
+3. **Check the calls.** The draft is tested on 40 recent posts, read from your feed with the read-only browser or taken from posts already stored. Each post shows what the filter would do and why. Flip the calls that are wrong. Nothing is saved to the database.
+4. **Approve.** The model rewrites the profile so the filter agrees with your corrections and lists what it changed. Apply it, and optionally re-judge stored posts. The old profile is backed up first.
+
+The wizard's state is saved, so closing the tab loses nothing. The panel opens on the Setup tab the first time it runs.
 
 <p>
 <img src="docs/images/panel-settings.png" alt="Settings tab" width="49%">
@@ -121,6 +129,10 @@ This opens a local web page at `http://127.0.0.1:8765`. Only your own computer c
 </p>
 
 The panel has no login, so it defends itself in three ways. The server binds to the loopback address only. Every request must name a loopback host, which stops DNS-rebinding pages. Every change must carry a token that is created at launch and embedded in the page, which stops other websites from posting to it. Digest text comes from Codex reading arbitrary web pages, so the panel escapes any HTML in it before display.
+
+LinkedIn and Google passwords are typed only into the agent's own browser window. The Gmail App Password is typed into the panel and goes straight to Windows Credential Manager; the panel never shows it again, logs it, or writes it to a file.
+
+Every button runs a `radar` command as a separate process. The panel, the scheduled task, and the tests therefore share one code path, and a job keeps running even if the browser tab closes.
 
 ## Installation
 
@@ -133,9 +145,9 @@ The panel has no login, so it defends itself in three ways. The server binds to 
 - A Google account for NotebookLM and Gmail
 - An OpenAI account for the Codex command-line interface (CLI)
 
-### 1. Install the tools
+### 1. Install the system tools
 
-Open PowerShell and install Git, Python, uv, Node.js, and Ollama:
+Open PowerShell and install Git, Python, uv, Node.js, and Ollama. These are the only programs the control panel cannot install for you.
 
 ```powershell
 winget install --id Git.Git -e
@@ -157,19 +169,9 @@ winget install --id OpenJS.NodeJS.LTS -e
 winget install --id Ollama.Ollama -e
 ```
 
-Open a new PowerShell window so Windows can find the installed tools. Install Codex CLI and sign in:
+### 2. Get the code and install it
 
-```powershell
-npm install -g @openai/codex
-```
-
-```powershell
-codex login
-```
-
-### 2. Get the code
-
-Clone the repository and enter its folder:
+Open a new PowerShell window so Windows can find the new tools, then clone the repository:
 
 ```powershell
 git clone https://github.com/AbrarFaiyad/research-radar.git
@@ -179,211 +181,57 @@ git clone https://github.com/AbrarFaiyad/research-radar.git
 cd research-radar
 ```
 
-Run the remaining commands from the `research-radar` folder.
-
-### 3. Create the Python environment
-
-A virtual environment keeps the project's Python packages together.
+Run the installer. It creates the Python environment, installs the app, creates `config/config.toml`, adds a **Research Radar** shortcut to the desktop and the Start menu, and opens the control panel.
 
 ```powershell
-uv venv -p 3.12 .venv
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-```powershell
-uv pip install -p .venv -e ".[dev]"
-```
+That is the last command you need.
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
+### 3. Finish in the control panel
 
-If PowerShell blocks activation, run the following once, then retry activation:
+The panel opens on the Setup tab.
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
+1. **Your field.** Run the [setup wizard](#setup-wizard). Drop in your CV, review the draft, test it on real posts, and approve it.
+2. **Checklist.** Press the button next to each item marked ✗. Usually that means downloading the local model (about 6.6 GB), installing the agent browser and Codex, and signing in to Codex, LinkedIn, and NotebookLM. Sign-ins open a browser window where you type your own password; the agent never sees it.
+3. **Daily email.** Enter your Gmail address and a [Gmail App Password](https://myaccount.google.com/apppasswords), which requires 2-Step Verification. Turn the daily email on and press **Send a test email**.
+4. **Schedule.** On the Schedule tab, pick a time and save.
 
-Alternatively, call `.\.venv\Scripts\radar.exe` directly in place of `radar`.
-
-### 4. Install the agent browser and the local model
-
-Install Chromium, the browser used by the agent:
-
-```powershell
-npx -y playwright@1.65.0-alpha-2026-10-30 install chromium
-```
-
-Download the local model. The download is about 6.6 GB.
-
-```powershell
-ollama pull mimo-v2.6
-```
-
-### 5. Configure
-
-Copy the example configuration:
-
-```powershell
-Copy-Item config/config.example.toml config/config.toml
-```
-
-Edit `config/config.toml`. Under `[email]`, set `enabled = true` and set `to` to your email address. If a different Gmail account will send the email, set `sender` to that address. Optionally, adjust the `[scan]` limits and the `[notebooklm]` podcast `length`.
-
-Edit `config/field_profile.md` to describe your field and the topics you want to follow. Git ignores `config/config.toml`, so it will not be included in commits.
-
-### 6. Sign in once
-
-Sign in to LinkedIn in the browser window that opens:
-
-```powershell
-radar login
-```
-
-Sign in to Google for NotebookLM in the next browser window:
-
-```powershell
-radar notebooklm-login
-```
-
-You enter these passwords in the browser; the agent does not need them.
-
-For email, enable 2-Step Verification on the sending Google account and create a [Gmail App Password](https://myaccount.google.com/apppasswords). An App Password is a separate password for an app. Run the command below and paste it at the hidden prompt. The password is stored in Windows Credential Manager.
-
-```powershell
-radar email-setup
-```
-
-### 7. Test it
-
-Check that every prerequisite is in place. Each failed check prints the command that fixes it.
-
-```powershell
-radar doctor
-```
-
-Start Ollama, then run the offline demo. It uses synthetic posts and replaces any existing `data/demo/` folder.
-
-```powershell
-radar demo
-```
-
-Run the tests:
-
-```powershell
-.\.venv\Scripts\python -m pytest
-```
-
-Scan up to 15 LinkedIn posts, create a digest, and send the email:
-
-```powershell
-radar scan --max-posts 15
-```
-
-```powershell
-radar digest
-```
-
-```powershell
-radar email
-```
-
-### 8. Run it every day
-
-Register a daily run for 07:00:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1 -Time 07:00
-```
-
-The task runs while you are logged in. Logs are saved in `data\logs\`. To remove the task:
-
-```powershell
-Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
-```
+To try a full run straight away, press **Full daily run** on the Dashboard and watch the log.
 
 ### Troubleshooting
 
-- **“LinkedIn feed not visible (not logged in?)”**: Run `radar login` again.
-- **“No SMTP password stored”**: Run `radar email-setup`.
-- **“Ollama model ... not reachable”**: Start Ollama and run `ollama pull mimo-v2.6`.
-- **Podcast failed after a NotebookLM page change**: The email still sends. Retry with `radar podcast`. The page selectors are in `src/radar/notebooklm.py`.
-- **Git reports “detected dubious ownership” in a cloud-synced folder**: Run `git config --global --add safe.directory <path>`, replacing `<path>` with the repository's full path.
+- **"LinkedIn feed not visible (not logged in?)"**: press **Sign in** next to LinkedIn login in the Setup checklist.
+- **"No SMTP password stored"**: enter the App Password under Daily email on the Setup tab.
+- **"Ollama model ... not reachable"**: start the Ollama app, then press **Download model** in the checklist.
+- **The podcast failed after a NotebookLM page change**: the email still goes out. Open the digest on the Digests tab and press **Make podcast**. The page selectors are in `src/radar/notebooklm.py`.
+- **The shortcut window closed and the panel stopped**: the minimized window is the panel's server. Open the shortcut again.
+- **Git reports "detected dubious ownership" in a cloud-synced folder**: run `git config --global --add safe.directory <path>`, replacing `<path>` with the repository's full path.
 
-## Usage
+## Command-line reference
 
-Every command below is also a button in the [control panel](#control-panel).
+You never need the command line after installing; every command here is a button in the panel. The commands exist because the panel and the scheduled task run them, and because they are handy for scripting and remote use. Run them as `.\.venv\Scripts\radar.exe <command>`, or as `radar <command>` with the environment activated.
 
-```powershell
-radar doctor
-```
+| Command | What it does | Panel button |
+|---|---|---|
+| `radar ui` | Open the control panel | Desktop shortcut |
+| `radar onboard draft` / `calibrate` / `refine` | Wizard steps: draft the profile, test it on posts, refine it from corrections | Setup, wizard |
+| `radar setup config` / `model` / `chromium` / `codex` / `codex-login` | Create the config, pull the local model, install the agent browser or Codex, sign in to Codex | Setup, checklist |
+| `radar login`, `radar notebooklm-login` | Sign in to LinkedIn or Google in the agent browser | Setup, checklist |
+| `radar email-setup` | Store the Gmail App Password (hidden prompt) | Setup, Daily email |
+| `radar doctor` | Check every prerequisite and print the fix for each gap | Setup, checklist |
+| `radar scan [--max-posts N]` | Scan the feed, classify new posts, refresh the queue | Dashboard, Scan feed |
+| `radar reclassify` | Re-judge stored posts with the current profile; newly relevant posts get their links resolved | Field profile, Save and re-judge |
+| `radar digest [--no-audio]` | Codex selects, sources, and summarizes the strongest 5 to 15 undigested posts, then NotebookLM makes the podcast | Dashboard, Digest |
+| `radar podcast [folder]` | Make the podcast again for a digest | Digests, Make podcast |
+| `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
+| `radar daily` | Scan, digest, and email as isolated stages, with a run record | Dashboard, Full daily run |
+| `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
+| `radar status` | Database counts, queue size, latest digest, last run | Dashboard |
+| `radar demo` | Classify synthetic posts into `data/demo/` with the local model | Setup, Offline demo |
 
-Check Ollama, the model, Codex, the agent browser, both logins, the email password, and the schedule.
-
-```powershell
-radar demo
-```
-
-The demo classifies synthetic posts and writes a queue under `data/demo/`. It uses Ollama and replaces any existing `data/demo/` directory.
-
-```powershell
-radar scan
-```
-
-Scan the feed, classify new posts and refresh the queue.
-
-```powershell
-radar reclassify
-```
-
-Re-judge every stored post with the current field profile, for example after editing `config/field_profile.md`. Posts that become relevant get their links resolved.
-
-```powershell
-radar queue
-```
-
-Export the current connection queue.
-
-```powershell
-radar queue mark <profile_url> sent
-```
-
-Replace `<profile_url>` with the author’s URL after sending a request. `skip`, `todo` and `connected` are also supported statuses.
-
-```powershell
-radar digest
-```
-
-Send every undigested saved post to Codex, which selects, sources, and summarizes the strongest 5 to 15, then generate the NotebookLM podcast. Codex judges every candidate, so each post is reviewed once. Saved posts older than three days (`backlog_days`) are dropped. A second run on the same day writes to a new folder, such as `2026-11-19-2`.
-
-```powershell
-radar podcast
-```
-
-Generate the NotebookLM podcast again for the latest digest, for example after a NotebookLM failure. Pass a folder name to pick another digest.
-
-```powershell
-radar daily
-```
-
-Run a scan followed by a digest.
-
-```powershell
-radar status
-```
-
-Show database counts, queue size, the latest digest, and the last run's stages.
-
-To schedule the daily cycle for 07:00:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install_schedule.ps1 -Time 07:00
-```
-
-The task runs when the user is logged in and starts after a missed run when available. Remove the default task with:
-
-```powershell
-Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
-```
+Codex reviews every candidate once, and saved posts older than three days (`backlog_days`) are dropped. A second digest on the same day goes to a new folder, such as `2026-11-19-2`. The daily task is `ResearchRadarDaily` in Task Scheduler; it runs while you are logged in, starts after a missed run, and logs to `data\logs\`.
 
 ## Engineering
 
@@ -392,7 +240,7 @@ Unregister-ScheduledTask -TaskName ResearchRadarDaily -Confirm:$false
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
 - **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
-- **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. `radar doctor` masks email addresses and home-folder paths in its output.
+- **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, and the wizard lets you keep it on your computer by drafting with the local model. Health checks mask email addresses and home-folder paths.
 - **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
 ## Example output
@@ -434,26 +282,16 @@ The notebook stays in your NotebookLM account, so you can also listen or ask que
 Email goes out through Gmail SMTP with an App Password. An App Password is a 16-character password that Google issues for one app; it requires 2-Step Verification on the account.
 
 1. Create one at <https://myaccount.google.com/apppasswords>.
-2. Set `to` (and `sender`, if a different Gmail account sends) under `[email]` in `config/config.toml`.
-3. Store the password in Windows Credential Manager. The prompt hides your input, and the password never touches the repository or config files.
-
-```powershell
-radar email-setup
-```
-
-4. Send a test with the latest digest:
-
-```powershell
-radar email
-```
+2. On the Setup tab, under Daily email, enter your Gmail address and the App Password, and turn the daily email on. The password goes to Windows Credential Manager and never touches the repository or config files. If a different Gmail account sends, set "Send from" on the Settings tab.
+3. Press **Send a test email**.
 
 To revoke access, delete the App Password in your Google account.
 
 ## Customizing the field
 
-Edit `config/field_profile.md` to define core topics, adjacent topics and material to skip, and set `reader` under `[profile]` in `config/config.toml` to describe who the digest is for. Both are editable in the control panel. The local screen and Codex both use this profile. Run `radar reclassify` afterward to apply the change to stored posts.
+The [setup wizard](#setup-wizard) writes `config/field_profile.md` (core topics, adjacent topics, and what to skip) and the `reader` line under `[profile]` in `config/config.toml`. You can rerun the wizard any time, or edit the profile directly on the Field profile tab and re-judge stored posts in one click. The local screen and Codex both use this profile.
 
-Concrete examples in the profile help the 9B model more than abstract categories. On the first live scan, adding one example line moved an agentic-coding preprint from skip to adjacent, and a biology rule stopped a protein-model press release from being marked core. Classification runs at temperature 0, so the same post gets the same verdict. Setting `think = true` under `[llm]` makes the model reason first; in tests this was about three times slower and not more accurate overall.
+Concrete examples in the profile help the 9B model more than abstract categories. On the first live scan, adding one example line moved an agentic-coding preprint from skip to adjacent, and a biology rule stopped a protein-model press release from being marked core. The wizard's calibration step makes this loop explicit: your corrections become those example lines. Classification runs at temperature 0, so the same post gets the same verdict. Setting `think = true` under `[llm]` makes the model reason first; in tests this was about three times slower and not more accurate overall.
 
 ## Tests
 
@@ -461,7 +299,7 @@ Concrete examples in the profile help the 9B model more than abstract categories
 .\.venv\Scripts\python -m pytest
 ```
 
-Tests cover classification, scanning, deduplication, link handling, queue exports, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, email composition and audio re-encoding, stage isolation and the run lock, health checks, settings validation, and the control panel API and its security checks. They use synthetic data and fakes, so they need no network, accounts, or GPU.
+Tests cover classification, scanning, deduplication, link handling, queue exports, browser tool restrictions, digest generation, NotebookLM page parsing and host guard, email composition and audio re-encoding, stage isolation and the run lock, health checks, settings validation, onboarding (CV extraction and redaction, draft, calibration, refinement, apply), and the control panel API and its security checks. They use synthetic data and fakes, so they need no network, accounts, or GPU.
 
 ## Limitations
 

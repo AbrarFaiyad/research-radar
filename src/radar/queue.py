@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import io
 import json
 from pathlib import Path
 
@@ -50,15 +51,20 @@ def _md_escape(s: str) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
 
 
+def csv_text(rows: list[dict]) -> str:
+    buf = io.StringIO(newline="")
+    w = csv.DictWriter(buf, fieldnames=COLUMNS)
+    w.writeheader()
+    w.writerows(rows)
+    return buf.getvalue()
+
+
 def write_queue(store: Store, out_dir: Path, include_done: bool = False) -> tuple[Path, Path, int]:
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = queue_records(store, include_done=include_done)
 
     csv_path = out_dir / "connect_queue.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS)
-        w.writeheader()
-        w.writerows(rows)
+    csv_path.write_text(csv_text(rows), encoding="utf-8", newline="")
 
     md_path = out_dir / "connect_queue.md"
     lines = [

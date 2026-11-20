@@ -29,7 +29,7 @@ Rules:
 - tier "core": the post's main content is a paper, preprint, dataset, model, tool, or concrete result in a Core area.
 - tier "adjacent": a paper, preprint, tool, system, or concrete result in an Adjacent area. Apply the
   Adjacent list generously: new HPC or AI-for-science computing resources, scientific-computing tools,
-  and scientific studies of AI agents all qualify even when they are not about materials.
+  and scientific studies of AI agents all qualify even when they are outside the Core topics.
 - tier "skip": everything else, including ads, business news, unrelated fields, and personal milestones
   (graduations, defenses, new jobs, awards, congratulations) that do not themselves report a result.
   An award or workshop post that describes the new technical work behind it is not a milestone; judge the work.
@@ -39,7 +39,7 @@ Rules:
   clearly unrelated posts.
 - Dates up to today are valid; do not reject a post because a paper or arXiv id looks recent.
 - summary: one plain sentence on what was done or found. reason: one short clause on why this tier.
-- topics: up to 5 short lowercase tags, e.g. "mlip", "mace", "mos2", "molten salts", "hpc".
+- topics: up to 5 short lowercase tags naming the specific method, system, or subfield (no generic tags such as "research" or "ai").
 Return only the JSON object."""
 
 
