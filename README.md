@@ -111,7 +111,7 @@ Open it with the **Research Radar** shortcut on the desktop or in the Start menu
 | Schedule | Change the daily run time or switch it off. |
 | Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
 | Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
-| Connection queue | Open each profile, then mark it Sent, Skip, or back to Todo. Download the list as CSV. |
+| Connection queue | **Send** opens the person's profile in your own browser; you click Connect there, then confirm in the panel and the person is marked sent. **Skip** drops them, and **Undo** brings them back. The agent never acts on LinkedIn. Download the list as CSV. |
 | Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, or email a digest again. |
 
 ### Setup wizard

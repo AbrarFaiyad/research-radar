@@ -277,7 +277,7 @@ textarea.mid { min-height: 380px; }
   <div class="row" style="margin-bottom:12px">
     <label class="row"><input type="checkbox" id="q-all"> Show sent and skipped</label>
     <a class="btn" id="q-csv" href="/api/queue.csv" download style="text-decoration:none">Download CSV</a>
-    <span class="muted">Open a profile, decide, send the request yourself, then mark it.</span>
+    <span class="muted">Send opens the profile in your browser. Click Connect there, then confirm here.</span>
   </div>
   <table><thead><tr><th>#</th><th>Name</th><th>Degree</th><th>Why</th><th>Topics</th><th>Status</th><th></th></tr></thead>
   <tbody id="q-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody></table>
@@ -458,12 +458,21 @@ async function loadQueue() {
     <td>${esc(r.degree)}</td><td>${esc(r.why)}</td>
     <td>${r.topics.split(", ").filter(Boolean).map(t => `<span class="tag">${esc(t)}</span>`).join("")}</td>
     <td>${esc(r.status)}</td>
-    <td class="row"><button class="btn" data-mark="sent" data-url="${esc(r.profile_url)}">Sent</button>
-      <button class="btn" data-mark="skip" data-url="${esc(r.profile_url)}">Skip</button>
-      ${r.status !== "todo" ? `<button class="btn" data-mark="todo" data-url="${esc(r.profile_url)}">Undo</button>` : ""}</td></tr>`).join("")
+    <td class="row">${r.status === "todo" ? `<button class="btn primary" data-send="${esc(r.profile_url)}">Send</button>
+      <button class="btn" data-mark="skip" data-url="${esc(r.profile_url)}">Skip</button>`
+      : `<button class="btn" data-mark="todo" data-url="${esc(r.profile_url)}">Undo</button>`}</td></tr>`).join("")
     : `<tr><td colspan="7" class="muted">Queue is empty. The next scan adds people behind saved posts.</td></tr>`;
-  $$("[data-mark]").forEach(b => b.onclick = async () => {
-    await api("/api/queue/mark", {profile_url: b.dataset.url, status: b.dataset.mark}); loadQueue(); loadStatus(); });
+  const mark = async (url, status) => { await api("/api/queue/mark", {profile_url: url, status}); loadQueue(); loadStatus(); };
+  $$("[data-mark]").forEach(b => b.onclick = () => mark(b.dataset.url, b.dataset.mark).catch(e => toast(e.message)));
+  // Send opens the profile in your own browser, where you click Connect yourself; the agent
+  // never acts on LinkedIn. Back here, confirm and the person is marked sent.
+  $$("[data-send]").forEach(b => b.onclick = () => {
+    const url = b.dataset.send, cell = b.parentElement;
+    window.open(url, "_blank", "noopener");
+    cell.innerHTML = `<span class="muted">Sent it?</span><button class="btn primary" data-yes>Yes, sent</button><button class="btn" data-no>Not yet</button>`;
+    cell.querySelector("[data-yes]").onclick = () => mark(url, "sent").catch(e => toast(e.message));
+    cell.querySelector("[data-no]").onclick = loadQueue;
+  });
 }
 $("#q-all").onchange = () => { $("#q-csv").href = `/api/queue.csv?all=${$("#q-all").checked}`; loadQueue(); };
 
