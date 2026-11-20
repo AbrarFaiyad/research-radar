@@ -99,17 +99,32 @@ def _committed_profile(root: Path) -> tuple[str | None, str]:
     return committed, ""
 
 
-def _write_record(record: BuildRecord, digest_folder: Path, records_dir: Path) -> None:
+def _write_record(record: BuildRecord, digest_folder: Path | None, records_dir: Path) -> None:
     data = asdict(record)
     if record.status == "published":
         data.pop("reason")
     text = json.dumps(data, indent=2)
-    digest_folder.mkdir(parents=True, exist_ok=True)
     records_dir.mkdir(parents=True, exist_ok=True)
-    for path in (digest_folder / "build.json", records_dir / f"{record.day}.json"):
+    paths = [records_dir / f"{record.day}.json"]
+    if digest_folder is not None:
+        digest_folder.mkdir(parents=True, exist_ok=True)
+        paths.insert(0, digest_folder / "build.json")
+    for path in paths:
         if record.status not in DONE and _has_done_record(path):
             continue  # a later skip or failure must not hide the day's published build
         path.write_text(text, encoding="utf-8")
+
+
+def record_skip(
+    cfg, day: str, reason: str, digest_folder: Path | None = None, log: Callable = print
+) -> BuildRecord:
+    """Write a skipped record for a build that never started (no digest, lock, key store)."""
+    record = BuildRecord(day=day, status="skipped", reason=reason)
+    try:
+        _write_record(record, digest_folder, cfg.builds_dir / "records")
+    except OSError:
+        log("builds: could not write the build record")
+    return record
 
 
 def _has_done_record(path: Path) -> bool:

@@ -18,6 +18,7 @@ import json
 import shutil
 import sys
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -274,6 +275,36 @@ def cmd_email(cfg, args) -> int:
     return _locked(cfg, "email", lambda: stage_email(cfg, args.folder, args.today_only, args.test))
 
 
+# Separate mode: the scheduled build may start while the daily run still holds the lock.
+BUILD_LOCK_POLL_S = 60
+BUILD_LOCK_WAIT_S = 2 * 3600
+DAILY_BUSY = "daily run still in progress"
+KEY_UNAVAILABLE = "API key unavailable"
+
+
+def _build_lock(cfg: Config, wait_for_daily: bool) -> RunLock | None:
+    """Take the run lock for a build. With `wait_for_daily`, a lock held by the daily run is
+    polled every BUILD_LOCK_POLL_S for up to BUILD_LOCK_WAIT_S; None means the wait ran out.
+    Any other holder raises LockHeld at once."""
+    deadline = time.monotonic() + BUILD_LOCK_WAIT_S
+    while True:
+        lock = RunLock(cfg, owner="build")
+        try:
+            return lock.__enter__()
+        except LockHeld:
+            held = lock.holder()
+            if not wait_for_daily or (held is not None and held.get("owner") != "daily"):
+                raise
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(BUILD_LOCK_POLL_S)
+
+
+def _print_build(rec) -> None:
+    detail = rec.url if rec.status == "published" else rec.reason
+    print(" ".join(x for x in ("build:", rec.status, rec.package, detail) if x))
+
+
 def cmd_build(cfg, args) -> int:
     from .builds import keys, sandbox
     from .builds import run as build_run
@@ -287,7 +318,16 @@ def cmd_build(cfg, args) -> int:
             sandbox.ensure_image(cfg)
         print("build network, proxy, and image are ready")
         return 0
-    folder = cfg.digests_dir / args.folder if args.folder else _latest_digest(cfg)
+    # The scheduled build of separate mode builds from today's digest only.
+    separate = cfg.builds.mode == "separate" and not args.folder and not args.retry
+    today = dt.date.today().isoformat()
+    if args.folder:
+        folder = cfg.digests_dir / args.folder
+    else:
+        folder = _latest_digest(cfg, today_only=separate)
+        if folder is None and separate:
+            _print_build(build_run.record_skip(cfg, today, "no digest today"))
+            return 0
     if folder is None or not (folder / "codex_result.json").exists():
         raise UserError("No finished digest found.")
     marker = folder / "build.json"
@@ -299,10 +339,20 @@ def cmd_build(cfg, args) -> int:
         print(f"build: {folder.name} already has a record ({status}); use --retry to run again")
         return 0
     result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
-    with RunLock(cfg, owner="build"):
-        rec = build_run.run_build(cfg, folder, result, api_key=keys.get_key())
-    detail = rec.url if rec.status == "published" else rec.reason
-    print(" ".join(x for x in ("build:", rec.status, rec.package, detail) if x))
+    try:
+        api_key = keys.get_key()
+    except Exception:  # noqa: BLE001 - a broken credential store is a skip, not a traceback
+        _print_build(build_run.record_skip(cfg, today, KEY_UNAVAILABLE, folder))
+        return 0
+    lock = _build_lock(cfg, wait_for_daily=separate)
+    if lock is None:
+        _print_build(build_run.record_skip(cfg, today, DAILY_BUSY, folder))
+        return 0
+    try:
+        rec = build_run.run_build(cfg, folder, result, api_key=api_key)
+    finally:
+        lock.__exit__(None, None, None)
+    _print_build(rec)
     return 1 if rec.status in ("failed", "blocked") else 0
 
 

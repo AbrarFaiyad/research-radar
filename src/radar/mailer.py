@@ -91,7 +91,7 @@ def _build_line(digest_folder: Path) -> str:
             line = f"**Daily build:** {data['package']} → {data['url']}"
             return line + (" (did not run; see its README)" if status == "did_not_run" else "")
         if status in ("skipped", "failed", "blocked"):
-            return f"Daily build skipped: {data.get('reason', '')}".rstrip(": ")
+            return f"Daily build {status}: {data.get('reason', '')}".rstrip(": ")
     except (OSError, ValueError, KeyError, AttributeError):
         pass
     return ""

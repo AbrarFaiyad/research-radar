@@ -331,7 +331,7 @@ The top-level README of the public repo lists every build with its date, package
 
 By default, the build starts as soon as Codex finishes the digest. It runs alongside the podcast, and the daily email reports the result. A failed or skipped build never fails the daily run.
 
-In Settings you can instead run builds on their own schedule, at a time you choose. That build uses the latest finished digest of the day and skips if there is none.
+In Settings you can instead run builds on their own schedule, at a time you choose. That build uses the latest finished digest of the day and skips if there is none. If the daily run is still going at that time, the build waits for it for up to two hours.
 
 The build takes the highest-ranked digest item that has a code link, an OSI-approved license, and a demo that runs on a CPU in about 10 minutes. It skips packages it has already built. If no item qualifies, the day is recorded as skipped.
 

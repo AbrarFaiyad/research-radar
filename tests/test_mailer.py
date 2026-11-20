@@ -191,3 +191,9 @@ def test_email_build_line_after_podcast_line(tmp_path):
     )
     body = mailer.compose_daily(CFG, d, q).get_body(("plain",)).get_content()
     assert body.index("**Podcast:**") < body.index("Daily build skipped") < body.index("#")
+
+
+@pytest.mark.parametrize("status", ["failed", "blocked", "skipped"])
+def test_email_build_line_uses_real_status(tmp_path, status):
+    body = _body(tmp_path, {"status": status, "reason": "why"})
+    assert f"Daily build {status}: why" in body

@@ -329,3 +329,132 @@ def test_set_schedule_task_parameter(monkeypatch, tmp_path):
     assert ran[0][ran[0].index("-TaskName") + 1] == "ResearchRadarDaily"
     with pytest.raises(ValueError, match="unknown task"):
         schedule.set_schedule(Path(tmp_path), "07:00", task="Other")
+
+
+# ---- separate mode, lock waits, key store errors ----------------------------------------------
+TODAY = __import__("datetime").date.today().isoformat()
+
+
+class FakeTime:
+    """Fake clock for the build-lock wait: sleep advances time and runs a hook."""
+
+    def __init__(self, on_sleep=None):
+        self.now = 0.0
+        self.sleeps = []
+        self.on_sleep = on_sleep
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.now += s
+        if self.on_sleep:
+            self.on_sleep(len(self.sleeps))
+
+
+@pytest.fixture
+def daily_lock(cfg):
+    """The run lock held by a live 'daily' process."""
+    import sys
+    import time
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    path = cfg.data_dir / "run.lock"
+    path.write_text(
+        json.dumps({"pid": proc.pid, "owner": "daily", "since": time.time()}), encoding="utf-8"
+    )
+    yield path
+    proc.kill()
+    proc.wait()
+
+
+def separate_cfg(cfg, monkeypatch, seen):
+    cfg.builds.mode = "separate"
+    rec = BuildRecord(day=TODAY, status="published", package="pkg", url="https://x/y")
+    monkeypatch.setattr(keys, "get_key", lambda: KEY)
+    monkeypatch.setattr(run_mod, "run_build", fake_build(rec, seen))
+
+
+def test_separate_mode_builds_only_todays_digest(cfg, monkeypatch, capsys):
+    seen = {}
+    separate_cfg(cfg, monkeypatch, seen)
+    make_digest(cfg, "2026-01-01")
+    assert cli.cmd_build(cfg, build_args()) == 0
+    assert "folder" not in seen and "no digest today" in capsys.readouterr().out
+    record = json.loads((cfg.builds_dir / "records" / f"{TODAY}.json").read_text("utf-8"))
+    assert record["status"] == "skipped" and record["reason"] == "no digest today"
+    today = make_digest(cfg, TODAY)
+    assert cli.cmd_build(cfg, build_args()) == 0
+    assert seen["folder"] == today
+
+
+def test_separate_mode_waits_for_daily_then_builds(cfg, monkeypatch, daily_lock):
+    seen = {}
+    separate_cfg(cfg, monkeypatch, seen)
+    make_digest(cfg, TODAY)
+    clock = FakeTime(on_sleep=lambda n: n == 3 and daily_lock.unlink())
+    monkeypatch.setattr(cli, "time", clock)
+    assert cli.cmd_build(cfg, build_args()) == 0
+    assert clock.sleeps == [60, 60, 60]
+    assert seen["locked"]["owner"] == "build"
+
+
+def test_separate_mode_gives_up_after_two_hours(cfg, monkeypatch, daily_lock, capsys):
+    seen = {}
+    separate_cfg(cfg, monkeypatch, seen)
+    folder = make_digest(cfg, TODAY)
+    clock = FakeTime()
+    monkeypatch.setattr(cli, "time", clock)
+    assert cli.cmd_build(cfg, build_args()) == 0
+    assert "folder" not in seen and len(clock.sleeps) == 120 and clock.now == 7200
+    assert "daily run still in progress" in capsys.readouterr().out
+    for path in (folder / "build.json", cfg.builds_dir / "records" / f"{TODAY}.json"):
+        data = json.loads(path.read_text("utf-8"))
+        assert (data["status"], data["reason"]) == ("skipped", "daily run still in progress")
+    assert daily_lock.exists()
+
+
+def test_manual_build_does_not_wait_for_daily(cfg, monkeypatch, daily_lock):
+    from radar.pipeline import LockHeld
+
+    seen = {}
+    separate_cfg(cfg, monkeypatch, seen)
+    cfg.builds.mode = "with_digest"
+    make_digest(cfg, TODAY)
+    clock = FakeTime()
+    monkeypatch.setattr(cli, "time", clock)
+    with pytest.raises(LockHeld):
+        cli.cmd_build(cfg, build_args())
+    assert clock.sleeps == [] and "folder" not in seen
+
+
+def test_separate_mode_does_not_wait_for_other_jobs(cfg, monkeypatch, daily_lock):
+    from radar.pipeline import LockHeld
+
+    info = json.loads(daily_lock.read_text("utf-8"))
+    daily_lock.write_text(json.dumps({**info, "owner": "scan"}), encoding="utf-8")
+    separate_cfg(cfg, monkeypatch, {})
+    make_digest(cfg, TODAY)
+    clock = FakeTime()
+    monkeypatch.setattr(cli, "time", clock)
+    with pytest.raises(LockHeld):
+        cli.cmd_build(cfg, build_args())
+    assert clock.sleeps == []
+
+
+def test_key_store_error_is_a_skip(cfg, monkeypatch, capsys):
+    folder = make_digest(cfg)
+    seen = {}
+
+    def broken():
+        raise RuntimeError("keyring backend exploded")
+
+    monkeypatch.setattr(keys, "get_key", broken)
+    monkeypatch.setattr(run_mod, "run_build", fake_build(BuildRecord("d", "published"), seen))
+    assert cli.cmd_build(cfg, build_args()) == 0
+    out = capsys.readouterr().out
+    assert "API key unavailable" in out and "exploded" not in out and "folder" not in seen
+    data = json.loads((folder / "build.json").read_text("utf-8"))
+    assert (data["status"], data["reason"]) == ("skipped", "API key unavailable")
