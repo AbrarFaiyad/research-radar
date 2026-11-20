@@ -180,11 +180,6 @@ def test_fake_png_blocked(root):
     assert "binary" in _reasons(_scan(root))
 
 
-def test_png_metadata_scanned(root):
-    (root / "p.png").write_bytes(make_png(_chunk(b"tEXt", b"Comment\x00" + FAKE_KEY.encode())))
-    assert "secret pattern" in _reasons(_scan(root))
-
-
 def test_scan_bytes_same_rules():
     f = scan.scan_bytes("index.md", f"x {FAKE_KEY} {MARK}".encode(), [MARK])
     assert {"secret pattern", "personal information"} <= {x.reason for x in f}
@@ -234,18 +229,102 @@ def test_accented_marker_forms():
     assert scan.scan_bytes("a.txt", "JOSE\u0301 fake".encode("utf-8"), m)
 
 
-def test_png_chunks():
-    z = _chunk(b"zTXt", b"Comment\x00\x00" + zlib.compress(FAKE_KEY.encode()))
-    assert "secret pattern" in _reasons(scan.scan_bytes("p.png", make_png(z), []))
-    i = _chunk(b"iTXt", b"k\x00\x01\x00en\x00k\x00" + zlib.compress(MARK.encode()))
-    assert "personal information" in _reasons(scan.scan_bytes("p.png", make_png(i), [MARK]))
-    assert "binary" in _reasons(scan.scan_bytes("p.png", make_png(_chunk(b"zzZz", b"x")), []))
-    assert "binary" in _reasons(scan.scan_bytes("p.png", PNG + b"trailing", []))
-    assert scan.scan_bytes("p.png", make_png(_chunk(b"pHYs", b"\x00" * 9)), [MARK]) == []
+def _p(*extra, idat=None):
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        + b"".join(extra)
+        + (idat if idat is not None else _chunk(b"IDAT", zlib.compress(b"\x00\x00")))
+        + _chunk(b"IEND")
+    )
+
+
+KEYB = b"sk-ant-api03-" + b"Ab3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5bC7d"
+EMAIL = ("me@" + MARK).encode()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _p(_chunk(b"tIME", KEYB)),
+        _p(_chunk(b"pHYs", EMAIL)),
+        _p(_chunk(b"tRNS", b"\x00" * 257)),
+        _p(_chunk(b"PLTE", b"\x00" * 770)),
+        _p(_chunk(b"PLTE", b"\x00" * 4)),
+        _p(_chunk(b"gAMA", b"\x00" * 5)),
+        _p(idat=_chunk(b"IDAT", KEYB)),
+        _p(_chunk(b"zTXt", b"k\x00\x00" + zlib.compress(b"x") + KEYB)),
+        _p(_chunk(b"zTXt", b"k\x00\x00" + zlib.compress(b"x") + zlib.compress(KEYB))),
+        _p(_chunk(b"iTXt", b"k\x00\x00\x00" + EMAIL + b"\x00t\x00hello")),
+        _p(_chunk(b"tEXt", b"k\x00" + ("me@" + MARK).encode("utf-16-le"))),
+        _p(_chunk(b"eXIf", b"MM\x00*" + KEYB.decode().encode("utf-16-le"))),
+        _p(_chunk(b"zzZz", b"x")),
+        _p(idat=_chunk(b"IDAT", zlib.compress(b"ab") + b"junk")),
+        _p(idat=_chunk(b"IDAT", zlib.compress(b"ab")[:-2])),
+        _p(idat=_chunk(b"IDAT", zlib.compress(b"ab")) + _chunk(b"IDAT", zlib.compress(b"cd"))),
+        _p() + b"trailing",
+        _p()[:-3],
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IEND"),
+    ],
+)
+def test_png_strict_blocks(data):
+    f = scan.scan_bytes("p.png", data, [MARK], secrets=[KEYB.decode()])
+    assert f and "Ab3dE5" not in str(f)
+
+
+def test_png_bad_crc_blocked():
+    data = bytearray(_p())
+    data[20] ^= 0xFF
+    assert scan.scan_bytes("p.png", bytes(data), []) == [scan.Finding("p.png", "binary")]
+
+
+def test_png_key_in_plte_caught():
+    pad = b"\x00" * (-len(KEYB) % 3)
+    f = scan.scan_bytes("p.png", _p(_chunk(b"PLTE", KEYB + pad)), [], secrets=[KEYB.decode()])
+    assert "secret pattern" in _reasons(f)
+
+
+def test_png_key_in_pixels_caught_with_secrets():
+    raw = _chunk(b"IDAT", zlib.compress(KEYB))
+    f = scan.scan_bytes("p.png", _p(idat=raw), [], secrets=[KEYB.decode()])
+    assert "known key" in _reasons(f)
+    # without a known key, pixel data is not text-scanned
+    assert scan.scan_bytes("p.png", _p(idat=raw), [MARK]) == []
+
+
+def test_png_inflate_bomb_bounded(monkeypatch):
+    monkeypatch.setattr(scan, "PNG_BUDGET", 1024 * 1024)
+    bomb = zlib.compress(b"a" * (4 * 1024 * 1024), 9)
+    chunks = [_chunk(b"IDAT", bomb[i : i + 200]) for i in range(0, len(bomb), 200)]
+    assert "binary" in _reasons(scan.scan_bytes("p.png", _p(idat=b"".join(chunks)), []))
+
+
+def test_sanitize_png_strips_metadata_keeps_pixels():
+    dirty = _p(
+        _chunk(b"tEXt", b"Software\x00matplotlib"),
+        _chunk(b"tIME", b"\x00" * 7),
+        _chunk(b"eXIf", b"MM\x00*"),
+        _chunk(b"iTXt", b"k\x00\x00\x00\x00\x00x"),
+        _chunk(b"pHYs", b"\x00" * 9),
+    )
+    assert "binary" in _reasons(scan.scan_bytes("p.png", dirty, []))
+    clean = scan.sanitize_png(dirty)
+    assert scan.scan_bytes("p.png", clean, []) == []
+    assert b"tEXt" not in clean and b"tIME" not in clean and b"pHYs" in clean
+    assert clean == _p(_chunk(b"pHYs", b"\x00" * 9))
+    assert scan.sanitize_png(dirty + b"tail") == clean
+
+
+def test_sanitize_png_rejects_malformed():
+    corrupt = bytearray(_p())
+    corrupt[20] ^= 0xFF
+    for bad in (b"nope", _p()[:-3], bytes(corrupt)):
+        with pytest.raises(ValueError):
+            scan.sanitize_png(bad)
 
 
 def test_pixel_data_not_marker_scanned():
-    assert scan.scan_bytes("p.png", PNG, ["IHD", "IDA", "IEN"]) == []
+    assert scan.scan_bytes("p.png", PNG, ["IHD", "IDA", "IEN", "IHDRIDAT"]) == []
 
 
 @pytest.mark.parametrize(
@@ -268,7 +347,7 @@ def test_svg_embedded_png():
     assert scan.scan_bytes("a.svg", ok, []) == []
     bad_png = make_png(_chunk(b"tEXt", b"k\x00" + FAKE_KEY.encode()))
     bad = prefix + base64.b64encode(bad_png) + b'"/></svg>'
-    assert "secret pattern" in _reasons(scan.scan_bytes("a.svg", bad, []))
+    assert "binary" in _reasons(scan.scan_bytes("a.svg", bad, []))
 
 
 def test_base64_encoded_fake_key_caught():

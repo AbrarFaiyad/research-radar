@@ -29,15 +29,16 @@ from radar.config import Config
 ARCHIVE_EXT = frozenset(
     {".zip", ".tar", ".gz", ".7z", ".whl", ".egg", ".pkl", ".pt", ".npz", ".h5"}
 )
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-PNG_HARMLESS = frozenset(
-    {b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"sBIT", b"pHYs", b"bKGD", b"hIST", b"tIME"}
-)
-PNG_TEXT = frozenset({b"tEXt", b"iTXt", b"zTXt"})
-MIN_MARKER_LEN = 3
 MB = 1024 * 1024
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PNG_KEEP = frozenset(
+    {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND", b"gAMA", b"cHRM", b"sRGB", b"pHYs"}
+)
+PNG_SIZES = {b"IHDR": 13, b"IEND": 0, b"gAMA": 4, b"cHRM": 32, b"sRGB": 1, b"pHYs": 9}
+PNG_BUDGET = 64 * MB  # total inflate allowance per file
+PNG_MARKER_LEN = 8  # shorter markers would match chunk bytes by chance
+MIN_MARKER_LEN = 3
 WINDOW = 16
-MAX_INFLATE = 4 * MB
 
 SECRET_RE = re.compile(
     r"sk-ant-"
@@ -206,71 +207,92 @@ def _high_entropy(text: str, hex_ok: bool) -> bool:
     return False
 
 
+def _png_chunks(data: bytes) -> list[tuple[bytes, bytes, bytes]]:
+    """Parse and validate chunk framing and CRCs; return (kind, body, raw) per chunk up to IEND."""
+    if not data.startswith(PNG_MAGIC):
+        raise ValueError("not a png")
+    out: list[tuple[bytes, bytes, bytes]] = []
+    pos = len(PNG_MAGIC)
+    while True:
+        if pos + 12 > len(data):
+            raise ValueError("truncated png")
+        (n,) = struct.unpack(">I", data[pos : pos + 4])
+        end = pos + 12 + n
+        if end > len(data):
+            raise ValueError("truncated png")
+        kind, body = data[pos + 4 : pos + 8], data[pos + 8 : pos + 8 + n]
+        (crc,) = struct.unpack(">I", data[end - 4 : end])
+        if zlib.crc32(kind + body) != crc:
+            raise ValueError("bad crc")
+        if not out and (kind != b"IHDR" or n != 13):
+            raise ValueError("IHDR must come first")
+        out.append((kind, body, data[pos:end]))
+        pos = end
+        if kind == b"IEND":
+            return out
+
+
+def sanitize_png(data: bytes) -> bytes:
+    """Rebuild a PNG keeping only the pixel-bearing and harmless chunks (drops text, EXIF, time)."""
+    chunks = _png_chunks(data)
+    return PNG_MAGIC + b"".join(raw for kind, _body, raw in chunks if kind in PNG_KEEP)
+
+
+def _png_pixels(chunks: list[tuple[bytes, bytes, bytes]]) -> bytes:
+    """Strict structure check; return the inflated pixel stream."""
+    kinds = [k for k, _, _ in chunks]
+    if kinds.count(b"IEND") != 1 or kinds.count(b"IHDR") != 1:
+        raise ValueError("bad chunk order")
+    idat = []
+    for kind, body, _raw in chunks:
+        if kind not in PNG_KEEP:
+            raise ValueError("chunk not allowed")
+        size = PNG_SIZES.get(kind)
+        if size is not None and len(body) != size:
+            raise ValueError("bad chunk length")
+        if kind == b"PLTE" and (len(body) % 3 or not 3 <= len(body) <= 768):
+            raise ValueError("bad palette")
+        if kind == b"tRNS" and len(body) > 256:
+            raise ValueError("bad transparency")
+        if kind == b"IDAT":
+            idat.append(body)
+    if not idat:
+        raise ValueError("no pixels")
+    d = zlib.decompressobj()
+    pixels = d.decompress(b"".join(idat), PNG_BUDGET)
+    if d.unconsumed_tail or not d.eof or d.unused_data:
+        raise ValueError("bad pixel stream")
+    return pixels
+
+
+def _known_in_bytes(blob: bytes, secrets: Sequence[str]) -> bool:
+    text = _alnum(blob.decode("latin-1"))
+    for sec in secrets:
+        wins, bwins = _secret_forms(sec)
+        if any(w in text for w in wins) or any(w in blob for w in bwins):
+            return True
+    return False
+
+
 def _png_findings(
     label: str, data: bytes, markers: list[str], secrets: Sequence[str]
 ) -> list[Finding]:
-    bad = [Finding(label, "binary")]
-    if not data.startswith(PNG_MAGIC):
-        return bad
+    """A PNG passes only if it is exactly pixels plus harmless chunks; nothing else may ride along."""
+    try:
+        chunks = _png_chunks(data)
+        if len(PNG_MAGIC) + sum(len(raw) for _, _, raw in chunks) != len(data):
+            raise ValueError("data after IEND")
+        pixels = _png_pixels(chunks)
+    except (ValueError, zlib.error):
+        return [Finding(label, "binary")]
     found: list[Finding] = []
-    pos, first, ended = len(PNG_MAGIC), True, False
-    while pos + 12 <= len(data) and not ended:
-        (n,) = struct.unpack(">I", data[pos : pos + 4])
-        kind = data[pos + 4 : pos + 8]
-        body = data[pos + 8 : pos + 8 + n]
-        if len(body) != n or pos + 12 + n > len(data):
-            return bad
-        if first and (kind != b"IHDR" or n != 13):
-            return bad
-        first = False
-        pos += 12 + n
-        if kind in (b"IHDR", b"PLTE", b"IDAT") or kind in PNG_HARMLESS:
-            continue
-        if kind == b"IEND":
-            ended = True
-        elif kind in PNG_TEXT:
-            try:
-                text = _png_text(kind, body)
-            except (zlib.error, ValueError):
-                return bad
-            found += _text_findings(label, text, markers, secrets)
-        elif kind == b"eXIf":
-            found += _text_findings(label, body.decode("latin-1"), markers, secrets, entropy=False)
-        else:
-            return bad  # unknown chunk could carry data
-    if not ended or pos != len(data):
-        return bad
+    meta = [body for kind, body, _ in chunks if kind != b"IDAT"]
+    if secrets and any(_known_in_bytes(b, secrets) for b in [data, pixels, *meta]):
+        found.append(Finding(label, "secret pattern (known key)"))
+    text = " ".join(b.decode("latin-1") for b in meta)
+    long_marks = [m for m in markers if len(m) >= PNG_MARKER_LEN]
+    found += _text_findings(label, text, long_marks, (), entropy=False)
     return found
-
-
-def _inflate(blob: bytes) -> bytes:
-    d = zlib.decompressobj()
-    out = d.decompress(blob, MAX_INFLATE)
-    if d.unconsumed_tail:
-        raise ValueError("png text too large")
-    return out
-
-
-def _png_text(kind: bytes, body: bytes) -> str:
-    key, sep, rest = body.partition(b"\x00")
-    if not sep:
-        raise ValueError("malformed png text")
-    if kind == b"tEXt":
-        payload = rest
-    elif kind == b"zTXt":
-        payload = _inflate(rest[1:])
-    else:  # iTXt: flag, method, language\0, translated keyword\0, text
-        flag, rest = rest[:1], rest[2:]
-        _lang, _, rest = rest.partition(b"\x00")
-        _tkey, _, rest = rest.partition(b"\x00")
-        payload = _inflate(rest) if flag == b"\x01" else rest
-    return (
-        key.decode("latin-1")
-        + " "
-        + payload.decode("utf-8", errors="replace")
-        + " "
-        + (payload.decode("latin-1"))
-    )
 
 
 def _scan_data(
