@@ -306,8 +306,12 @@ def publish(folder: str, src: Path, repo: Path) -> None:
         for rel, data in real.items():
             (dest / rel).write_bytes(data)
     status = "published" if ran else "did_not_run"
+    result: dict[str, object] = {"status": status, "folder": folder}
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if run_id.isdigit():
+        result["run_id"] = int(run_id)
     (dest / "build-result.json").write_text(
-        json.dumps({"status": status, "folder": folder}) + "\n", encoding="utf-8", newline="\n"
+        json.dumps(result) + "\n", encoding="utf-8", newline="\n"
     )
     update_index(repo, folder, ran)
     commit(repo, folder)

@@ -27,9 +27,22 @@ if TYPE_CHECKING:
 GH_TIMEOUT_S = 60
 WORKFLOW = "build.yml"
 POLL_S = 30
+RETRIES = 4
+RETRY_WAIT_S = 5
 CLOCK_SKEW_S = 60
 RESULT_STATUSES = ("published", "did_not_run")
-ENV_ALLOW = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP")
+ENV_ALLOW = (
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+)
 GH_FALLBACK = "C:/Program Files/GitHub CLI/gh.exe"
 
 GhFn = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -48,10 +61,10 @@ def _gh_config_dir() -> str | None:
     host = os.environ
     if host.get("GH_CONFIG_DIR"):
         cand = Path(host["GH_CONFIG_DIR"])
-    elif os.name == "nt":
-        cand = Path(host.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "GitHub CLI"
     elif host.get("XDG_CONFIG_HOME"):
         cand = Path(host["XDG_CONFIG_HOME"]) / "gh"
+    elif os.name == "nt":
+        cand = Path(host.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "GitHub CLI"
     else:
         cand = Path.home() / ".config" / "gh"
     return str(cand) if cand.is_dir() else None
@@ -145,6 +158,7 @@ def find_run(
     wait: float = 6,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
+    """The oldest run of this folder at or after `since`, else the newest within the skew."""
     oldest = since - dt.timedelta(seconds=CLOCK_SKEW_S)
     args = [
         "run",
@@ -160,7 +174,8 @@ def find_run(
     ]
     for attempt in range(attempts):
         data = _json(gh, args)
-        best: tuple[dt.datetime, int] | None = None
+        after: list[tuple[dt.datetime, int]] = []
+        skew: list[tuple[dt.datetime, int]] = []
         for item in data if isinstance(data, list) else []:
             if not isinstance(item, dict) or item.get("displayTitle") != f"build {folder}":
                 continue
@@ -168,10 +183,11 @@ def find_run(
             run_id = item.get("databaseId")
             if created is None or created < oldest or not isinstance(run_id, int):
                 continue
-            if best is None or created > best[0]:
-                best = (created, run_id)
-        if best:
-            return best[1]
+            (after if created >= since else skew).append((created, run_id))
+        if after:
+            return min(after)[1]
+        if skew:
+            return max(skew)[1]
         if attempt < attempts - 1:
             sleep(wait)
     raise ActionsError("could not find the workflow run")
@@ -187,17 +203,37 @@ def wait_run(
 ) -> str:
     args = ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion"]
     start = clock()
+    reached = False
     while True:
         data = _json(gh, args)
-        if isinstance(data, dict) and data.get("status") == "completed":
-            return str(data.get("conclusion") or "failure")
+        if isinstance(data, dict):
+            reached = True
+            if data.get("status") == "completed":
+                return str(data.get("conclusion") or "failure")
         if clock() - start >= limit_s:
+            if not reached:
+                raise ActionsError("could not reach GitHub")
             return "building"
         sleep(POLL_S)
 
 
-def _read_result(cfg: Config, folder: str, gh_fn: GhFn) -> str | None:
-    data = _json(gh_fn, ["api", f"repos/{cfg.builds.repo}/contents/{folder}/build-result.json"])
+def _retry_json(
+    gh_fn: GhFn, args: list[str], sleep: Callable[[float], None], attempts: int = RETRIES
+) -> Any:
+    for attempt in range(attempts):
+        data = _json(gh_fn, args)
+        if data is not None:
+            return data
+        if attempt < attempts - 1:
+            sleep(RETRY_WAIT_S)
+    return None
+
+
+def _read_result(
+    cfg: Config, folder: str, run_id: int, gh_fn: GhFn, sleep: Callable[[float], None]
+) -> str | None:
+    path = f"repos/{cfg.builds.repo}/contents/{folder}/build-result.json"
+    data = _retry_json(gh_fn, ["api", path], sleep)
     if not isinstance(data, dict) or not isinstance(data.get("content"), str):
         return None
     try:
@@ -206,14 +242,25 @@ def _read_result(cfg: Config, folder: str, gh_fn: GhFn) -> str | None:
         return None
     if not isinstance(result, dict) or result.get("folder") != folder:
         return None
+    got = result.get("run_id")
+    if isinstance(got, bool) or got != run_id:
+        return None
     status = result.get("status")
     return status if status in RESULT_STATUSES else None
 
 
-def outcome(cfg: Config, run_id: int, folder: str, gh: GhFn = gh) -> tuple[str, str]:
+def outcome(
+    cfg: Config,
+    run_id: int,
+    folder: str,
+    gh: GhFn = gh,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, str]:
     """Map a finished run to (status, reason). Reasons are fixed phrases."""
-    data = _json(
-        gh, ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion,jobs"]
+    data = _retry_json(
+        gh,
+        ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion,jobs"],
+        sleep,
     )
     if not isinstance(data, dict):
         return "failed", "could not read the workflow run"
@@ -222,7 +269,7 @@ def outcome(cfg: Config, run_id: int, folder: str, gh: GhFn = gh) -> tuple[str, 
     }
     build, publish = jobs.get("build"), jobs.get("publish")
     if publish == "success":
-        status = _read_result(cfg, folder, gh)
+        status = _read_result(cfg, folder, run_id, gh, sleep)
         if status is None:
             return "failed", "unexpected build result"
         return status, "build did not run" if status == "did_not_run" else ""

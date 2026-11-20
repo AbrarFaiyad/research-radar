@@ -338,6 +338,7 @@ def env(tmp_path, monkeypatch):
     _git(repo, *ident, "commit", "-m", "seed")
     _git(repo, "push", "origin", "HEAD:main")
     monkeypatch.delenv("RADAR_PRIVATE_MARKERS", raising=False)
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
     art = tmp_path / "artifact"
     art.mkdir()
     monkeypatch.syspath_prepend(str(repo / "tools"))
@@ -445,6 +446,15 @@ def test_scripted_svg_dropped(env, svg):
     outs = published_nb(env)["cells"][0]["outputs"]
     assert "image/svg+xml" not in outs[0]["data"]
     assert outs[1]["data"]["image/svg+xml"]
+
+
+def test_result_carries_run_id(env, monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "4242")
+    env.status()
+    write_nb(env, [md("# Hello"), code()])
+    assert env.run() == 0
+    result = json.loads((env.repo / FOLDER / "build-result.json").read_text())
+    assert result == {"status": "published", "folder": FOLDER, "run_id": 4242}
 
 
 def test_did_not_run_adds_banner(env):

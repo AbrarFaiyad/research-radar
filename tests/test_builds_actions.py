@@ -17,6 +17,10 @@ CFG = SimpleNamespace(builds=SimpleNamespace(repo=REPO))
 SINCE = dt.datetime(2026, 11, 20, 12, 0, 0, tzinfo=dt.UTC)
 
 
+def NOSLEEP(s):  # noqa: N802
+    return None
+
+
 def done(out="", code=0):
     return subprocess.CompletedProcess([], code, stdout=out, stderr="SECRET-stderr")
 
@@ -89,7 +93,7 @@ def test_dispatch_os_error_and_timeout():
 # find_run
 
 
-def test_find_run_picks_newest_matching():
+def test_find_run_ignores_other_folders_and_old_runs():
     gh = FakeGh(
         runs(
             run_item("other-folder", rid=9),
@@ -100,7 +104,7 @@ def test_find_run_picks_newest_matching():
         )
     )
     rid = actions.find_run(CFG, FOLDER, SINCE, gh=gh, sleep=lambda s: None)
-    assert rid == 4
+    assert rid == 3
     assert gh.calls[0][:6] == ["run", "list", "-R", REPO, "--workflow", "build.yml"]
 
 
@@ -190,9 +194,9 @@ def content(payload):
 def test_outcome_published():
     gh = FakeGh(
         view("success", "success", "success"),
-        content({"status": "published", "folder": FOLDER}),
+        content({"status": "published", "folder": FOLDER, "run_id": 5}),
     )
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh)[0] == "published"
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP)[0] == "published"
     assert gh.calls[0] == ["run", "view", "5", "-R", REPO, "--json", "status,conclusion,jobs"]
     assert gh.calls[1] == ["api", f"repos/{REPO}/contents/{FOLDER}/build-result.json"]
 
@@ -200,16 +204,19 @@ def test_outcome_published():
 def test_outcome_did_not_run():
     gh = FakeGh(
         view("success", "success", "success"),
-        content({"status": "did_not_run", "folder": FOLDER}),
+        content({"status": "did_not_run", "folder": FOLDER, "run_id": 5}),
     )
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh)[0] == "did_not_run"
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP)[0] == "did_not_run"
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"status": "weird", "folder": FOLDER},
-        {"status": "published", "folder": "other"},
+        {"status": "weird", "folder": FOLDER, "run_id": 5},
+        {"status": "published", "folder": "other", "run_id": 5},
+        {"status": "published", "folder": FOLDER},
+        {"status": "published", "folder": FOLDER, "run_id": 6},
+        {"status": "published", "folder": FOLDER, "run_id": True},
         {"status": "published"},
         ["list"],
         "not json {",
@@ -217,40 +224,52 @@ def test_outcome_did_not_run():
 )
 def test_outcome_bad_result_file(payload):
     gh = FakeGh(view("success", "success", "success"), content(payload))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "unexpected build result")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
+        "failed",
+        "unexpected build result",
+    )
 
 
 def test_outcome_result_fetch_error():
     gh = FakeGh(view("success", "success", "success"), done("", code=1))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "unexpected build result")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
+        "failed",
+        "unexpected build result",
+    )
     gh = FakeGh(view("success", "success", "success"), done(json.dumps({"content": "!!!"})))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "unexpected build result")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
+        "failed",
+        "unexpected build result",
+    )
 
 
 def test_outcome_publish_failure_is_blocked():
     gh = FakeGh(view("failure", "success", "failure"))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("blocked", "leak scan blocked the build")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
+        "blocked",
+        "leak scan blocked the build",
+    )
 
 
 @pytest.mark.parametrize("build,publish", [("failure", "skipped"), ("failure", None)])
 def test_outcome_build_failure(build, publish):
     gh = FakeGh(view("failure", build, publish))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "build job failed")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == ("failed", "build job failed")
 
 
 def test_outcome_timed_out_build():
     gh = FakeGh(view("failure", "timed_out", "skipped"))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "build job failed")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == ("failed", "build job failed")
 
 
 def test_outcome_cancelled():
     gh = FakeGh(view("cancelled", "cancelled", "skipped"))
-    assert actions.outcome(CFG, 5, FOLDER, gh=gh) == ("failed", "workflow cancelled")
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == ("failed", "workflow cancelled")
 
 
 def test_outcome_gh_failure_and_garbage():
     for reply in (done("", code=1), done("nope"), OSError("x")):
-        assert actions.outcome(CFG, 5, FOLDER, gh=FakeGh(reply)) == (
+        assert actions.outcome(CFG, 5, FOLDER, gh=FakeGh(reply), sleep=NOSLEEP) == (
             "failed",
             "could not read the workflow run",
         )
@@ -258,7 +277,7 @@ def test_outcome_gh_failure_and_garbage():
 
 def test_reasons_never_carry_gh_output():
     gh = FakeGh(view("failure", "failure", "skipped"))
-    status, reason = actions.outcome(CFG, 5, FOLDER, gh=gh)
+    status, reason = actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP)
     assert "SECRET" not in reason
 
 
@@ -307,3 +326,78 @@ def test_gh_runs_subprocess_with_argv_and_env(monkeypatch):
     assert got["kw"]["errors"] == "replace"
     assert not got["kw"].get("shell")
     assert "GH_TOKEN" not in got["kw"]["env"]
+
+
+def test_outcome_retries_run_view_and_contents():
+    gh = FakeGh(
+        done("", code=1),
+        view("success", "success", "success"),
+        done("", code=1),
+        done("", code=1),
+        content({"status": "published", "folder": FOLDER, "run_id": 5}),
+    )
+    sleeps = []
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=sleeps.append)[0] == "published"
+    assert len(gh.calls) == 5
+    assert len(sleeps) == 3
+
+
+def test_outcome_gives_up_after_four_tries():
+    gh = FakeGh(done("", code=1))
+    assert actions.outcome(CFG, 5, FOLDER, gh=gh, sleep=NOSLEEP) == (
+        "failed",
+        "could not read the workflow run",
+    )
+    assert len(gh.calls) == 4
+
+
+def test_find_run_prefers_oldest_after_since_over_skew_run():
+    gh = FakeGh(
+        runs(
+            run_item(created="2026-11-20T11:59:30Z", rid=1),
+            run_item(created="2026-11-20T12:00:10Z", rid=2),
+            run_item(created="2026-11-20T12:03:00Z", rid=3),
+        )
+    )
+    assert actions.find_run(CFG, FOLDER, SINCE, gh=gh, sleep=NOSLEEP) == 2
+
+
+def test_find_run_falls_back_to_newest_in_skew():
+    gh = FakeGh(
+        runs(
+            run_item(created="2026-11-20T11:59:00Z", rid=1),
+            run_item(created="2026-11-20T11:59:40Z", rid=2),
+        )
+    )
+    assert actions.find_run(CFG, FOLDER, SINCE, gh=gh, sleep=NOSLEEP) == 2
+
+
+def test_wait_run_never_reached_raises():
+    gh = FakeGh(done("", code=1))
+    t = {"now": 0.0}
+
+    def sleep(s):
+        t["now"] += s
+
+    with pytest.raises(ActionsError) as e:
+        actions.wait_run(CFG, 5, 100, gh=gh, sleep=sleep, clock=lambda: t["now"])
+    assert str(e.value) == "could not reach GitHub"
+
+
+def test_gh_env_passes_profile_vars(monkeypatch):
+    for k in ("USERPROFILE", "APPDATA", "LOCALAPPDATA"):
+        monkeypatch.setenv(k, "C:/x")
+    env = actions.gh_env()
+    assert env["USERPROFILE"] == env["APPDATA"] == env["LOCALAPPDATA"] == "C:/x"
+    assert "GH_TOKEN" not in env
+
+
+def test_gh_config_dir_order(monkeypatch, tmp_path):
+    monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    (tmp_path / "gh").mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert actions.gh_env()["GH_CONFIG_DIR"] == str(tmp_path / "gh")
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    monkeypatch.setenv("GH_CONFIG_DIR", str(explicit))
+    assert actions.gh_env()["GH_CONFIG_DIR"] == str(explicit)
