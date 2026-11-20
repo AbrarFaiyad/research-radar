@@ -229,3 +229,141 @@ def test_jobs_pass_custom_config(tmp_path):
     argv = started["argv"]
     assert argv[argv.index("--config") + 1] == str(tmp_path / "alt.toml")
     assert argv[-3:] == ["scan", "--max-posts", "5"]
+
+
+# ---- daily builds -----------------------------------------------------------------------------
+def _make_build(
+    client, day="2026-11-19", status="published", folder="2026-11-19_pkg_task", work=True
+):
+    import json
+
+    builds = client.cfg.data_dir / "builds"
+    (builds / "records").mkdir(parents=True, exist_ok=True)
+    rec = {
+        "day": day,
+        "status": status,
+        "package": "pkg",
+        "folder": folder,
+        "url": "",
+        "seconds": 1,
+    }
+    if status != "published":
+        rec["reason"] = "scan found a secret"
+    (builds / "records" / f"{day}.json").write_text(json.dumps(rec), encoding="utf-8")
+    if work:
+        out = builds / "work" / folder / "output"
+        out.mkdir(parents=True)
+        (builds / "work" / folder / "README.md").write_text(
+            "# Kit\n\n<script>alert(1)</script>\n", encoding="utf-8"
+        )
+        (builds / "work" / folder / "BUILD_LOG.md").write_text("tried **x**", encoding="utf-8")
+        (out / "plot.png").write_bytes(b"\x89PNG fake")
+        (out / "pic.svg").write_text("<svg><script>alert(1)</script></svg>", encoding="utf-8")
+        (out / "data.csv").write_text("a,b", encoding="utf-8")
+        (builds / "secret.png").write_bytes(b"outside")
+    return builds
+
+
+def test_builds_list_newest_first_with_running_job(client):
+    _make_build(client, day="2026-11-18", folder="2026-11-18_a_b", work=False)
+    _make_build(client, day="2026-11-19")
+    (client.cfg.data_dir / "builds" / "records" / "bad.json").write_text("{", encoding="utf-8")
+    d = client.get("/api/builds").json()
+    assert [b["day"] for b in d["builds"]] == ["2026-11-19", "2026-11-18"] and d["job"] is None
+    client.post("/api/jobs", json={"action": "build"}, headers=H)
+    assert client.get("/api/builds").json()["job"]["action"] == "build"
+
+
+def test_build_detail_renders_safely_and_lists_images(client):
+    _make_build(client)
+    d = client.get("/api/builds/2026-11-19").json()
+    assert d["record"]["package"] == "pkg" and d["has_folder"]
+    assert "<h1>Kit</h1>" in d["readme_html"] and "<script>" not in d["readme_html"]
+    assert "<strong>x</strong>" in d["log_html"]
+    assert d["images"] == ["pic.svg", "plot.png"]
+
+
+def test_build_detail_without_folder_and_bad_day(client):
+    _make_build(client, status="blocked", work=False)
+    d = client.get("/api/builds/2026-11-19").json()
+    assert d["has_folder"] is False and d["readme_html"] is None and d["images"] == []
+    assert client.get("/api/builds/2026-11-20").status_code == 404
+    assert client.get("/api/builds/..%2Fx").status_code in (400, 404)
+    assert client.get("/api/builds/not-a-day").status_code == 400
+
+
+def test_build_record_folder_cannot_escape_work(client):
+    builds = _make_build(client, folder="../..", work=False)
+    d = client.get("/api/builds/2026-11-19").json()
+    assert d["has_folder"] is False
+    assert client.get("/api/builds/2026-11-19/file/plot.png").status_code == 404
+    assert builds.exists()
+
+
+def test_build_file_serves_images_with_safe_headers(client):
+    _make_build(client)
+    r = client.get("/api/builds/2026-11-19/file/plot.png")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    s = client.get("/api/builds/2026-11-19/file/pic.svg")
+    assert s.headers["content-type"].startswith("image/svg+xml")
+    assert s.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+    assert s.headers["x-content-type-options"] == "nosniff"
+
+
+def test_build_file_rejects_traversal_and_non_images(client):
+    _make_build(client)
+    assert client.get("/api/builds/2026-11-19/file/..%2F..%2Fconfig.toml").status_code == 400
+    assert client.get("/api/builds/2026-11-19/file/..%2Fsecret.png").status_code == 400
+    assert client.get("/api/builds/2026-11-19/file/data.csv").status_code == 404
+    assert client.get("/api/builds/2026-11-19/file/README.md").status_code == 404
+    assert client.get("/api/builds/2026-11-19/file/missing.png").status_code == 404
+
+
+def test_builds_key_stored_and_never_echoed(client, monkeypatch):
+    import keyring
+
+    saved = {}
+    monkeypatch.setattr(keyring, "set_password", lambda s, u, k: saved.update(s=s, u=u, k=k))
+    key = "sk-ant-" + "a" * 30
+    r = client.post("/api/builds/key", json={"key": f" {key}\n"}, headers=H)
+    assert r.status_code == 200 and r.json() == {"saved": True} and key not in r.text
+    assert saved == {"s": "research-radar-anthropic", "u": "default", "k": key}
+    assert client.post("/api/builds/key", json={"key": "tooshort"}, headers=H).status_code == 400
+    assert saved["k"] == key  # the rejected key was not stored
+
+
+def test_builds_posts_need_token(client):
+    assert client.post("/api/builds/key", json={"key": "x" * 30}).status_code == 403
+    assert client.post("/api/schedule", json={"task": "ResearchRadarBuild"}).status_code == 403
+
+
+def test_schedule_task_validated(client, monkeypatch):
+    from radar.ui import schedule
+
+    seen = []
+    monkeypatch.setattr(
+        schedule,
+        "set_schedule",
+        lambda root, time, enabled, task=schedule.TASK: seen.append(task) or {},
+    )
+    assert client.get("/api/schedule?task=Evil").status_code == 400
+    body = {"time": "08:00", "task": "ResearchRadarBuild"}
+    assert client.post("/api/schedule", json=body, headers=H).status_code == 200
+    assert client.post("/api/schedule", json={"time": "08:00"}, headers=H).status_code == 200
+    assert seen == ["ResearchRadarBuild", "ResearchRadarDaily"]
+    bad = {"time": "08:00", "task": "Evil"}
+    monkeypatch.undo()
+    assert client.post("/api/schedule", json=bad, headers=H).status_code == 400
+
+
+def test_page_has_builds_tab_and_key_field(client):
+    html = client.get("/").text
+    for needle in (
+        'data-tab="builds"',
+        'id="b-key"',
+        "ResearchRadarBuild",
+        "builds-key",
+        "build-image",
+    ):
+        assert needle in html

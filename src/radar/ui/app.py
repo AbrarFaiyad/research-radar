@@ -33,6 +33,11 @@ from .jobs import ACTIONS, JobBusy, JobRunner
 
 _DIGEST_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 _PROFILE_MAX = 50_000
+_BUILD_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
+_FILE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+_IMAGE_TYPES = {".png": "image/png", ".svg": "image/svg+xml"}
+_BUILD_ACTIONS = ("build", "build-retry", "build-image")
+_KEY_MIN = 20
 
 
 def create_app(
@@ -149,13 +154,21 @@ def create_app(
 
     # ---- schedule -------------------------------------------------------------------------
     @app.get("/api/schedule")
-    def get_schedule() -> dict:
-        return schedule.get()
+    def get_schedule(task: str = schedule.TASK) -> dict:
+        try:
+            return schedule.get(task)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
 
     @app.post("/api/schedule")
     def set_schedule(payload: dict = Body(...)) -> dict:
         try:
-            return schedule.set_schedule(cfg.root, payload.get("time"), payload.get("enabled"))
+            return schedule.set_schedule(
+                cfg.root,
+                payload.get("time"),
+                payload.get("enabled"),
+                task=payload.get("task", schedule.TASK),
+            )
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
         except RuntimeError as e:
@@ -396,6 +409,117 @@ def create_app(
         finally:
             store.close()
         return {"updated": n}
+
+    # ---- daily builds ---------------------------------------------------------------------
+    def build_record(day: str) -> dict:
+        if not _DIGEST_NAME.match(day):
+            raise HTTPException(400, "bad day")
+        path = fresh().builds_dir / "records" / f"{day}.json"
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise HTTPException(404, "no build for that day") from None
+        if not isinstance(rec, dict):
+            raise HTTPException(404, "no build for that day")
+        return rec
+
+    def build_work(rec: dict) -> Path | None:
+        """The day's work folder, taken from the record and kept inside data/builds/work."""
+        name = str(rec.get("folder", ""))
+        if not _BUILD_FOLDER.match(name):
+            return None
+        base = (fresh().builds_dir / "work").resolve()
+        work = (base / name).resolve()
+        if work.parent != base or not work.is_dir():
+            return None
+        return work
+
+    def read_text(path: Path) -> str | None:
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def output_images(work: Path | None) -> list[str]:
+        out = work / "output" if work else None
+        if out is None or out.is_symlink() or not out.is_dir():
+            return []
+        return sorted(
+            p.name
+            for p in out.iterdir()
+            if p.is_file()
+            and not p.is_symlink()
+            and p.suffix.lower() in _IMAGE_TYPES
+            and _FILE_NAME.match(p.name)
+        )
+
+    @app.get("/api/builds")
+    def list_builds() -> dict:
+        out = []
+        for path in sorted((fresh().builds_dir / "records").glob("*.json"), reverse=True):
+            if not _DIGEST_NAME.match(path.stem):
+                continue
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+        job = runner.current
+        running = job.summary() if job and job.running and job.action in _BUILD_ACTIONS else None
+        return {"builds": out, "job": running}
+
+    @app.post("/api/builds/key")
+    def builds_key(payload: dict = Body(...)) -> dict:
+        from ..builds.keys import set_key
+
+        key = "".join(str(payload.get("key", "")).split())
+        if len(key) < _KEY_MIN:
+            raise HTTPException(
+                400, f"that does not look like an API key (under {_KEY_MIN} characters)"
+            )
+        set_key(key)
+        return {"saved": True}
+
+    @app.get("/api/builds/{day}")
+    def build_detail(day: str) -> dict:
+        rec = build_record(day)
+        work = build_work(rec)
+        readme = read_text(work / "README.md") if work else None
+        log = read_text(work / "BUILD_LOG.md") if work else None
+        digests = sorted(
+            (p.name for p in fresh().digests_dir.glob(f"{day}*") if _DIGEST_NAME.match(p.name)),
+        )
+        return {
+            "record": rec,
+            "has_folder": work is not None,
+            "readme_html": safe_markdown(readme) if readme is not None else None,
+            "log_html": safe_markdown(log) if log is not None else None,
+            "images": output_images(work),
+            "digest": digests[0] if digests else None,
+        }
+
+    @app.get("/api/builds/{day}/file/{name:path}")
+    def build_file(day: str, name: str):
+        if not _FILE_NAME.match(name) or name.startswith(".."):
+            raise HTTPException(400, "bad file name")
+        rec = build_record(day)
+        suffix = Path(name).suffix.lower()
+        if suffix not in _IMAGE_TYPES:
+            raise HTTPException(404, "no such image")
+        work = build_work(rec)
+        if work is None:
+            raise HTTPException(404, "no such image")
+        out = (work / "output").resolve()
+        path = (out / name).resolve()
+        if path.parent != out or (out / name).is_symlink() or not path.is_file():
+            raise HTTPException(404, "no such image")
+        headers = {"X-Content-Type-Options": "nosniff"}
+        if suffix == ".svg":  # a scripted SVG must not run, even when opened on its own
+            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
+        return FileResponse(path, media_type=_IMAGE_TYPES[suffix], headers=headers)
 
     # ---- digests --------------------------------------------------------------------------
     def digest_folder(name: str) -> Path:
