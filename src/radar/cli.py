@@ -223,7 +223,7 @@ def stage_email(
         print(f"test email sent to {cfg.email.to}")
         return {"attachments": []}
     folder = cfg.digests_dir / folder_name if folder_name else _latest_digest(cfg, today_only)
-    msg = compose_daily(cfg.email, folder, cfg.queue_dir)
+    msg = compose_daily(cfg.email, folder, cfg.queue_dir, build_repo=cfg.builds.repo)
     send(cfg.email, msg)
     names = [p.get_filename() for p in msg.iter_attachments()]
     print(

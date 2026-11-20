@@ -233,91 +233,27 @@ def test_jobs_pass_custom_config(tmp_path):
 
 # ---- daily builds -----------------------------------------------------------------------------
 def _make_build(
-    client, day="2026-11-19", status="published", folder="2026-11-19_pkg_task", work=True
+    client, day="2026-11-19", status="published", folder="2026-11-19_pkg_task", **extra
 ):
     import json
 
     builds = client.cfg.builds_dir
     (builds / "records").mkdir(parents=True, exist_ok=True)
-    rec = {
-        "day": day,
-        "status": status,
-        "package": "pkg",
-        "folder": folder,
-        "url": "",
-        "seconds": 1,
-    }
-    if status != "published":
+    rec = {"day": day, "status": status, "package": "pkg", "folder": folder, "url": "", **extra}
+    if status not in ("published", "building"):
         rec["reason"] = "scan found a secret"
     (builds / "records" / f"{day}.json").write_text(json.dumps(rec), encoding="utf-8")
-    if work:
-        out = builds / "work" / folder / "output"
-        out.mkdir(parents=True)
-        (builds / "work" / folder / "README.md").write_text(
-            "# Kit\n\n<script>alert(1)</script>\n", encoding="utf-8"
-        )
-        (builds / "work" / folder / "BUILD_LOG.md").write_text("tried **x**", encoding="utf-8")
-        (out / "plot.png").write_bytes(b"\x89PNG fake")
-        (out / "pic.svg").write_text("<svg><script>alert(1)</script></svg>", encoding="utf-8")
-        (out / "data.csv").write_text("a,b", encoding="utf-8")
-        (builds / "secret.png").write_bytes(b"outside")
     return builds
 
 
 def test_builds_list_newest_first_with_running_job(client):
-    _make_build(client, day="2026-11-18", folder="2026-11-18_a_b", work=False)
+    _make_build(client, day="2026-11-18", folder="2026-11-18_a_b")
     _make_build(client, day="2026-11-19")
     (client.cfg.builds_dir / "records" / "bad.json").write_text("{", encoding="utf-8")
     d = client.get("/api/builds").json()
     assert [b["day"] for b in d["builds"]] == ["2026-11-19", "2026-11-18"] and d["job"] is None
     client.post("/api/jobs", json={"action": "build"}, headers=H)
     assert client.get("/api/builds").json()["job"]["action"] == "build"
-
-
-def test_build_detail_renders_safely_and_lists_images(client):
-    _make_build(client)
-    d = client.get("/api/builds/2026-11-19").json()
-    assert d["record"]["package"] == "pkg" and d["has_folder"]
-    assert "<h1>Kit</h1>" in d["readme_html"] and "<script>" not in d["readme_html"]
-    assert "<strong>x</strong>" in d["log_html"]
-    assert d["images"] == ["pic.svg", "plot.png"]
-
-
-def test_build_detail_without_folder_and_bad_day(client):
-    _make_build(client, status="blocked", work=False)
-    d = client.get("/api/builds/2026-11-19").json()
-    assert d["has_folder"] is False and d["readme_html"] is None and d["images"] == []
-    assert client.get("/api/builds/2026-11-20").status_code == 404
-    assert client.get("/api/builds/..%2Fx").status_code in (400, 404)
-    assert client.get("/api/builds/not-a-day").status_code == 400
-
-
-def test_build_record_folder_cannot_escape_work(client):
-    builds = _make_build(client, folder="../..", work=False)
-    d = client.get("/api/builds/2026-11-19").json()
-    assert d["has_folder"] is False
-    assert client.get("/api/builds/2026-11-19/file/plot.png").status_code == 404
-    assert builds.exists()
-
-
-def test_build_file_serves_images_with_safe_headers(client):
-    _make_build(client)
-    r = client.get("/api/builds/2026-11-19/file/plot.png")
-    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
-    assert r.headers["x-content-type-options"] == "nosniff"
-    s = client.get("/api/builds/2026-11-19/file/pic.svg")
-    assert s.headers["content-type"].startswith("image/svg+xml")
-    assert s.headers["content-security-policy"] == "default-src 'none'; style-src 'unsafe-inline'"
-    assert s.headers["x-content-type-options"] == "nosniff"
-
-
-def test_build_file_rejects_traversal_and_non_images(client):
-    _make_build(client)
-    assert client.get("/api/builds/2026-11-19/file/..%2F..%2Fconfig.toml").status_code == 400
-    assert client.get("/api/builds/2026-11-19/file/..%2Fsecret.png").status_code == 400
-    assert client.get("/api/builds/2026-11-19/file/data.csv").status_code == 404
-    assert client.get("/api/builds/2026-11-19/file/README.md").status_code == 404
-    assert client.get("/api/builds/2026-11-19/file/missing.png").status_code == 404
 
 
 def test_builds_key_goes_to_the_repo_secret_and_is_never_echoed(client, monkeypatch):
@@ -377,55 +313,10 @@ def test_page_has_builds_tab_and_key_field(client):
         'id="b-key"',
         "ResearchRadarBuild",
         "builds-key",
-        "build-image",
+        "build-init-repo",
+        "build-sync",
     ):
         assert needle in html
-
-
-def test_build_file_refuses_linked_output_dir(client, tmp_path):
-    import os
-
-    builds = _make_build(client)
-    out = builds / "work" / "2026-11-19_pkg_task" / "output"
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (elsewhere / "leak.png").write_bytes(b"PNG leak")
-    shutil.rmtree(out)
-    try:
-        os.symlink(elsewhere, out, target_is_directory=True)
-    except OSError:
-        pytest.skip("cannot create symlinks here")
-    assert client.get("/api/builds/2026-11-19/file/leak.png").status_code == 404
-    assert client.get("/api/builds/2026-11-19").json()["images"] == []
-
-
-@pytest.mark.skipif(__import__("sys").platform != "win32", reason="junctions are Windows only")
-def test_build_file_refuses_junction_output_dir(client, tmp_path):
-    import _winapi
-
-    builds = _make_build(client)
-    out = builds / "work" / "2026-11-19_pkg_task" / "output"
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (elsewhere / "leak.png").write_bytes(b"PNG leak")
-    shutil.rmtree(out)
-    _winapi.CreateJunction(str(elsewhere), str(out))
-    assert client.get("/api/builds/2026-11-19/file/leak.png").status_code == 404
-    assert client.get("/api/builds/2026-11-19").json()["images"] == []
-
-
-def test_build_markdown_drops_remote_images(client):
-    builds = _make_build(client)
-    (builds / "work" / "2026-11-19_pkg_task" / "README.md").write_text(
-        "hi ![chart](https://evil.example/t.png) <img src='https://evil.example/x.png'>",
-        encoding="utf-8",
-    )
-    (builds / "work" / "2026-11-19_pkg_task" / "BUILD_LOG.md").write_text(
-        "![](http://evil.example/p.gif)", encoding="utf-8"
-    )
-    d = client.get("/api/builds/2026-11-19").json()
-    assert "<img" not in d["readme_html"] and "<img" not in d["log_html"]
-    assert "evil.example" not in d["log_html"] and "chart" in d["readme_html"]
 
 
 def test_cancel_kills_the_job_without_docker(tmp_path, monkeypatch):
@@ -441,3 +332,52 @@ def test_cancel_kills_the_job_without_docker(tmp_path, monkeypatch):
     r.current.proc = SimpleNamespace(pid=4242, terminate=lambda: killed.append("term"))
     assert r.cancel() is True
     assert killed
+
+
+def test_build_detail_links_to_github_only(client):
+    _make_build(client, url="https://github.com/own/builds/tree/main/2026-11-19_pkg_task")
+    d = client.get("/api/builds/2026-11-19").json()
+    assert d["record"]["package"] == "pkg" and d["record"]["run_url"] == ""
+    assert d["record"]["url"].startswith("https://github.com/own/builds/tree/main/")
+    assert "readme_html" not in d and "images" not in d and "has_folder" not in d
+    _make_build(client, url="https://evil.example/x")
+    assert client.get("/api/builds/2026-11-19").json()["record"]["url"] == ""
+    _make_build(client, url="javascript:alert(1)")
+    assert client.get("/api/builds/2026-11-19").json()["record"]["url"] == ""
+
+
+def _set_repo(client, repo):
+    cfg_file = client.cfg.root / "config" / "config.toml"
+    cfg_file.write_text("[builds]\n" + f'repo = "{repo}"\n', encoding="utf-8")
+
+
+def test_building_record_gets_the_run_link(client):
+    _set_repo(client, "own/builds")
+    _make_build(client, status="building", run_id=4242)
+    rec = client.get("/api/builds").json()["builds"][0]
+    assert rec["run_url"] == "https://github.com/own/builds/actions/runs/4242"
+    assert client.get("/api/builds/2026-11-19").json()["record"]["run_url"] == rec["run_url"]
+
+
+def test_run_link_needs_an_integer_run_id_and_building_status(client):
+    _set_repo(client, "own/builds")
+    for extra in ({"run_id": "4242/../x"}, {"run_id": True}, {"run_id": None}, {}):
+        _make_build(client, status="building", **extra)
+        assert client.get("/api/builds").json()["builds"][0]["run_url"] == ""
+    _make_build(client, status="published", run_id=4242)
+    assert client.get("/api/builds").json()["builds"][0]["run_url"] == ""
+    _set_repo(client, "bad repo")
+    _make_build(client, status="building", run_id=4242)
+    assert client.get("/api/builds").json()["builds"][0]["run_url"] == ""
+
+
+def test_local_work_folder_endpoints_are_gone(client):
+    _make_build(client)
+    assert client.get("/api/builds/2026-11-19/file/plot.png").status_code == 404
+
+
+def test_page_has_no_dead_build_image_action_and_shows_run_link(client):
+    html = client.get("/").text
+    assert "build-image" not in html and "work folder" not in html
+    for needle in ("Set up repo", ">Sync<", "run_url", "build-init-repo", "build-sync"):
+        assert needle in html

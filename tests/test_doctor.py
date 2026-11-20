@@ -78,7 +78,12 @@ def test_model_tag_must_match(cfg, tmp_path):
 
 
 def _builds_probes(tmp_path, **kw):
-    base = {"repo_visibility": lambda repo: "PUBLIC"}
+    base = {
+        "repo_visibility": lambda repo: "PUBLIC",
+        "gh_scopes": lambda: {"repo", "workflow"},
+        "workflow_installed": lambda repo: True,
+        "secret_names": lambda repo: {"ANTHROPIC_API_KEY"},
+    }
     base.update(kw)
     return _probes(tmp_path, **base)
 
@@ -109,3 +114,113 @@ def test_repo_check_needs_repo_set(cfg, tmp_path):
     cfg.builds.enabled, cfg.builds.repo = True, ""
     checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
     assert not checks["daily-builds repo"].ok
+
+
+def _on(cfg):
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+
+
+def test_builds_checks_all_green(cfg, tmp_path):
+    _on(cfg)
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    for name in (
+        "gh signed in with workflow scope",
+        "daily-builds repo",
+        "workflow installed",
+        "Anthropic key secret",
+    ):
+        assert checks[name].ok, name
+
+
+def test_scope_check_fails_without_workflow_scope(cfg, tmp_path):
+    _on(cfg)
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, gh_scopes=lambda: {"repo"}))).get(
+        "gh signed in with workflow scope"
+    )
+    assert c and not c.ok and c.action.startswith("https://") and "workflow" in c.fix
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, gh_scopes=lambda: None)))[
+        "gh signed in with workflow scope"
+    ]
+    assert not c.ok
+
+
+def test_workflow_check_offers_repo_setup(cfg, tmp_path):
+    _on(cfg)
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, workflow_installed=lambda r: False)))[
+        "workflow installed"
+    ]
+    assert not c.ok and c.action == "build-init-repo"
+
+
+def test_key_secret_check_offers_add_key(cfg, tmp_path):
+    _on(cfg)
+    for names in (set(), {"OTHER"}, None):
+        c = _by_name(run_checks(cfg, _builds_probes(tmp_path, secret_names=lambda r, n=names: n)))[
+            "Anthropic key secret"
+        ]
+        assert not c.ok and c.action == "builds-key"
+
+
+def test_probes_receive_the_configured_repo(cfg, tmp_path):
+    _on(cfg)
+    seen = []
+    run_checks(
+        cfg,
+        _builds_probes(
+            tmp_path,
+            workflow_installed=lambda r: seen.append(("wf", r)) or True,
+            secret_names=lambda r: seen.append(("sec", r)) or {"ANTHROPIC_API_KEY"},
+        ),
+    )
+    assert seen == [("wf", "someone/daily-builds"), ("sec", "someone/daily-builds")]
+
+
+def test_builds_details_are_masked(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, "me@gmail.com"
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    assert "me@gmail.com" not in checks["daily-builds repo"].detail
+    assert "m***@gmail.com" in checks["daily-builds repo"].detail
+
+
+def test_default_probes_use_gh_with_minimal_env(monkeypatch):
+    from types import SimpleNamespace
+
+    from radar import doctor
+    from radar.builds import actions
+
+    calls = []
+
+    def fake_gh(args, **kw):
+        calls.append(args)
+        if args[:2] == ["auth", "status"]:
+            return SimpleNamespace(
+                returncode=0, stdout="  - Token scopes: 'repo', 'workflow'", stderr=""
+            )
+        if args[0] == "secret":
+            return SimpleNamespace(
+                returncode=0, stdout='[{"name": "ANTHROPIC_API_KEY"}]', stderr=""
+            )
+        if args[0] == "repo":
+            return SimpleNamespace(returncode=0, stdout='{"visibility": "PUBLIC"}', stderr="")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(actions, "gh", fake_gh)
+    assert doctor._gh_scopes() == {"repo", "workflow"}
+    assert doctor._secret_names("o/r") == {"ANTHROPIC_API_KEY"}
+    assert doctor._repo_visibility("o/r") == "PUBLIC"
+    assert doctor._workflow_installed("o/r") is True
+    assert ["api", "repos/o/r/contents/.github/workflows/build.yml"] in calls
+
+
+def test_default_probes_fail_closed(monkeypatch):
+    from radar import doctor
+    from radar.builds import actions
+
+    def boom(args, **kw):
+        raise OSError("no gh")
+
+    monkeypatch.setattr(actions, "gh", boom)
+    assert doctor._gh_scopes() is None
+    assert doctor._secret_names("o/r") is None
+    assert doctor._repo_visibility("o/r") is None
+    assert doctor._workflow_installed("o/r") is False

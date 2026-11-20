@@ -53,11 +53,8 @@ pre.log { background: var(--code); border: 1px solid var(--line); border-radius:
 .stage.ok { color: var(--ok); } .stage.bad { color: var(--bad); } .stage.warn { color: var(--warn); }
 .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; background: var(--code); }
 .badge.published { color: var(--ok); } .badge.did_not_run, .badge.skipped { color: var(--warn); }
-.badge.blocked, .badge.failed { color: var(--bad); }
-.bimg { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
-.bimg img { max-width: 100%; max-height: 360px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.badge.blocked, .badge.failed { color: var(--bad); } .badge.building { color: var(--warn); }
 tr.pick { cursor: pointer; } tr.pick:hover td, tr.pick.active td { background: var(--code); }
-details.blog { margin: 12px 0; } details.blog summary { cursor: pointer; color: var(--muted); }
 .checks { list-style: none; padding: 0; margin: 0; }
 .checks li { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 22px 170px 1fr auto; gap: 8px; align-items: center; }
 .checks li .btn { padding: 4px 10px; font-size: 13px; }
@@ -253,7 +250,7 @@ textarea.mid { min-height: 380px; }
 
   <div class="card" style="margin-top:16px" id="build-key-card">
     <h2>Anthropic API key (daily builds)</h2>
-    <p class="muted" style="margin-top:0">Daily builds call the Anthropic API. Use a dedicated key with a low monthly spend limit. It is stored in Windows Credential Manager, never in a file, and is never shown again.</p>
+    <p class="muted" style="margin-top:0">Daily builds call the Anthropic API. Use a dedicated key with a low monthly spend limit. It is stored as the encrypted secret <code>ANTHROPIC_API_KEY</code> in your daily-builds repo, never on this PC, and is never shown again. The build job can read it, so spend-limit it.</p>
     <div class="field"><label for="b-key">API key <div class="help">paste to set or replace</div></label><input id="b-key" type="password" autocomplete="off" class="wide"></div>
     <div class="row" style="margin-top:8px"><button class="btn primary" id="b-key-save">Save key</button></div>
   </div>
@@ -325,6 +322,8 @@ textarea.mid { min-height: 380px; }
 <section id="builds" class="tab">
   <div class="row" style="margin-bottom:12px">
     <button class="btn primary" id="b-now">Build now</button>
+    <button class="btn" id="b-sync">Sync</button>
+    <button class="btn" id="b-init">Set up repo</button>
     <span class="muted" id="b-job">Builds the latest digest's best package. Turn builds on in Settings first.</span>
   </div>
   <table><thead><tr><th>Date</th><th>Package</th><th>Task</th><th>Status</th><th>Link</th></tr></thead>
@@ -391,10 +390,10 @@ async function loadNext() {
 }
 const FIX_LABEL = {"setup-config": "Create", "setup-model": "Download model", "setup-chromium": "Install",
   "setup-codex": "Install", "login": "Sign in", "notebooklm-login": "Sign in", "email-password": "Set up",
-  "schedule": "Set time", "onboard": "Start", "builds-key": "Add key", "build-image": "Build image"};
+  "schedule": "Set time", "onboard": "Start", "builds-key": "Add key", "build-init-repo": "Set up repo"};
 function fixButton(c) {
   if (c.ok || !c.action) return "<span></span>";
-  if (/^https:/.test(c.action)) return `<a class="btn" href="${esc(c.action)}" target="_blank" rel="noopener">Download</a>`;
+  if (/^https:/.test(c.action)) return `<a class="btn" href="${esc(c.action)}" target="_blank" rel="noopener">Open</a>`;
   return `<button class="btn" data-fix="${esc(c.action)}">${esc(FIX_LABEL[c.action] || "Fix")}</button>`;
 }
 async function loadChecks() {
@@ -410,7 +409,6 @@ function runFix(action) {
   if (action === "schedule") return openTab("schedule");
   if (action === "email-password") { openTab("setup"); $("#email-card").scrollIntoView({behavior: "smooth"}); return $("#e-to").focus(); }
   if (action === "builds-key") { openTab("setup"); $("#build-key-card").scrollIntoView({behavior: "smooth"}); return $("#b-key").focus(); }
-  if (action === "build-image") return startJob({action});
   if (action === "onboard") { openTab("setup"); return $("#wizard").scrollIntoView({behavior: "smooth"}); }
   startJob({action});
 }
@@ -566,34 +564,38 @@ async function showDigest(name, meta, btn) {
 }
 
 // ---- daily builds
-const BUILD_STATUS = {published: "published", did_not_run: "did not run", blocked: "blocked", failed: "failed", skipped: "skipped"};
+const BUILD_STATUS = {published: "published", did_not_run: "did not run", blocked: "blocked", failed: "failed", skipped: "skipped", building: "building"};
 const taskOf = b => (b.folder || "").split("_")[2] || "";
 const IDLE_BUILD = "Builds the latest digest's best package. Turn builds on in Settings first.";
+const GH = /^https:\/\/github\.com\//;
+const buildLinks = b => [
+  GH.test(b.url || "") ? `<a href="${esc(b.url)}" target="_blank" rel="noopener noreferrer">repo folder</a>` : "",
+  GH.test(b.run_url || "") ? `<a href="${esc(b.run_url)}" target="_blank" rel="noopener noreferrer">run</a>` : ""].filter(Boolean).join(" · ");
 async function loadBuilds() {
   const d = await api("/api/builds");
   $("#b-job").textContent = d.job ? `Running ${d.job.action} since ${new Date(d.job.started * 1000).toLocaleTimeString()}…` : IDLE_BUILD;
-  $("#b-now").disabled = !!d.job;
+  $("#b-now").disabled = $("#b-sync").disabled = $("#b-init").disabled = !!d.job;
   $("#b-body").innerHTML = d.builds.length ? d.builds.map(b => `<tr class="pick" data-bday="${esc(b.day)}"><td>${esc(b.day)}</td><td>${esc(b.package)}</td>
     <td>${esc(taskOf(b))}</td><td><span class="badge ${esc(b.status)}">${esc(BUILD_STATUS[b.status] || b.status)}</span></td>
-    <td>${/^https:\/\//.test(b.url || "") ? `<a href="${esc(b.url)}" target="_blank" rel="noopener noreferrer">repo folder</a>` : ""}</td></tr>`).join("")
+    <td>${buildLinks(b)}</td></tr>`).join("")
     : `<tr><td colspan="5" class="muted">No builds yet.</td></tr>`;
   $$("#b-body [data-bday]").forEach(tr => tr.onclick = e => { if (!e.target.closest("a")) showBuild(tr.dataset.bday, tr).catch(err => toast(err.message)); });
 }
 async function showBuild(day, row) {
   $$("#b-body tr").forEach(x => x.classList.toggle("active", x === row));
   const d = await api(`/api/builds/${encodeURIComponent(day)}`), r = d.record, v = $("#b-view");
-  const imgs = d.images.map(n => `<img alt="${esc(n)}" src="/api/builds/${encodeURIComponent(day)}/file/${encodeURIComponent(n)}">`).join("");
   v.hidden = false;
   v.innerHTML = `<div class="row" style="margin:14px 0 4px"><b>${esc(day)} · ${esc(r.package)}</b>
       <span class="badge ${esc(r.status)}">${esc(BUILD_STATUS[r.status] || r.status)}</span>
-      ${r.status !== "published" && d.digest ? `<button class="btn" id="b-retry">Retry</button>` : ""}</div>
+      ${!["published", "building"].includes(r.status) && d.digest ? `<button class="btn" id="b-retry">Retry</button>` : ""}</div>
     ${r.reason ? `<p class="${r.status === "did_not_run" || r.status === "skipped" ? "warn" : "bad"}">${esc(r.reason)}</p>` : ""}
-    ${d.has_folder ? "" : `<p class="muted">The work folder is gone (blocked and failed builds are deleted), so there is no README or output to show.</p>`}
-    ${d.readme_html || ""}${imgs ? `<div class="bimg">${imgs}</div>` : ""}
-    ${d.log_html ? `<details class="blog"><summary>Build log</summary>${d.log_html}</details>` : ""}`;
+    ${r.status === "building" ? `<p class="muted">Still running on GitHub. Press Sync to collect the result.</p>` : ""}
+    <p class="muted">The notebook, README and outputs live on GitHub, not on this PC. ${buildLinks(r) || "No link yet."}</p>`;
   $("#b-retry")?.addEventListener("click", () => startJob({action: "build-retry", folder: d.digest}));
 }
 $("#b-now").onclick = async () => { if (await startJob({action: "build"})) loadBuilds(); };
+$("#b-sync").onclick = async () => { if (await startJob({action: "build-sync"})) loadBuilds(); };
+$("#b-init").onclick = async () => { if (await startJob({action: "build-init-repo"})) loadBuilds(); };
 jobDone.push(j => { if (j.action.startsWith("build")) { loadBuilds(); loadChecks(); } });
 $("#b-key-save").onclick = async () => {
   const el = $("#b-key"); if (!el.value.trim()) return toast("Paste the key first");

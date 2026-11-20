@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import mimetypes
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -82,7 +83,7 @@ def build_message(
     return msg
 
 
-def _build_line(digest_folder: Path) -> str:
+def _build_line(digest_folder: Path, repo: str = "") -> str:
     """One line about the day's build, from build.json only; nothing else in it is used."""
     try:
         data = json.loads((digest_folder / "build.json").read_text(encoding="utf-8"))
@@ -90,6 +91,15 @@ def _build_line(digest_folder: Path) -> str:
         if status in ("published", "did_not_run"):
             line = f"**Daily build:** {data['package']} → {data['url']}"
             return line + (" (did not run; see its README)" if status == "did_not_run" else "")
+        if status == "building":
+            run_id = data.get("run_id")
+            if (
+                isinstance(run_id, int)
+                and not isinstance(run_id, bool)
+                and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
+            ):
+                return f"Daily build still running: https://github.com/{repo}/actions/runs/{run_id}"
+            return "Daily build still running"
         if status in ("skipped", "failed", "blocked"):
             return f"Daily build {status}: {data.get('reason', '')}".rstrip(": ")
     except (OSError, ValueError, KeyError, AttributeError):
@@ -98,7 +108,11 @@ def _build_line(digest_folder: Path) -> str:
 
 
 def compose_daily(
-    cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path, today: dt.date | None = None
+    cfg: EmailCfg,
+    digest_folder: Path | None,
+    queue_dir: Path,
+    today: dt.date | None = None,
+    build_repo: str = "",
 ) -> EmailMessage:
     today = today or dt.date.today()
     queue_md = queue_dir / "connect_queue.md"
@@ -111,7 +125,7 @@ def compose_daily(
                 f"**Podcast:** attached, and playable in NotebookLM: "
                 f"<{link_file.read_text(encoding='utf-8').strip()}>"
             )
-        build_line = _build_line(digest_folder)
+        build_line = _build_line(digest_folder, build_repo)
         if build_line:
             parts.append(build_line)
         parts.append((digest_folder / "summary.md").read_text(encoding="utf-8"))

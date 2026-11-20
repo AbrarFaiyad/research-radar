@@ -145,11 +145,11 @@ def test_oversize_m4a_is_reencoded_to_fit(tmp_path):
     assert email_ready(src, budget_bytes=10**9) == src  # fits: attached unchanged
 
 
-def _body(tmp_path, build: dict | None):
+def _body(tmp_path, build: dict | None, repo: str = ""):
     d, q = _digest(tmp_path)
     if build is not None:
         (d / "build.json").write_text(__import__("json").dumps(build), encoding="utf-8")
-    msg = mailer.compose_daily(CFG, d, q, today=dt.date(2026, 11, 19))
+    msg = mailer.compose_daily(CFG, d, q, today=dt.date(2026, 11, 19), build_repo=repo)
     return msg.get_body(("plain",)).get_content()
 
 
@@ -197,3 +197,24 @@ def test_email_build_line_after_podcast_line(tmp_path):
 def test_email_build_line_uses_real_status(tmp_path, status):
     body = _body(tmp_path, {"status": status, "reason": "why"})
     assert f"Daily build {status}: why" in body
+
+
+def test_email_build_line_building_links_the_run(tmp_path):
+    body = _body(tmp_path, {"status": "building", "run_id": 4242}, repo="own/builds")
+    assert "Daily build still running: https://github.com/own/builds/actions/runs/4242" in body
+
+
+@pytest.mark.parametrize(
+    ("build", "repo"),
+    [
+        ({"status": "building", "run_id": "4242"}, "own/builds"),
+        ({"status": "building", "run_id": True}, "own/builds"),
+        ({"status": "building", "run_id": 4242}, ""),
+        ({"status": "building", "run_id": 4242}, "bad repo/x y"),
+        ({"status": "building"}, "own/builds"),
+    ],
+)
+def test_email_build_line_building_needs_int_run_and_repo(tmp_path, build, repo):
+    body = _body(tmp_path, build, repo=repo)
+    assert "actions/runs" not in body
+    assert "Daily build still running" in body

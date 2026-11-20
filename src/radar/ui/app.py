@@ -13,7 +13,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import os
 import re
 import secrets
 import webbrowser
@@ -34,9 +33,6 @@ from .jobs import ACTIONS, JobBusy, JobRunner
 
 _DIGEST_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 _PROFILE_MAX = 50_000
-_BUILD_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
-_FILE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-_IMAGE_TYPES = {".png": "image/png", ".svg": "image/svg+xml"}
 _BUILD_ACTIONS = ("build", "build-retry", "build-sync", "build-init-repo")
 _KEY_MIN = 20
 
@@ -424,37 +420,23 @@ def create_app(
             raise HTTPException(404, "no build for that day")
         return rec
 
-    def build_work(rec: dict) -> Path | None:
-        """The day's work folder, taken from the record and kept inside the builds work folder."""
-        name = str(rec.get("folder", ""))
-        if not _BUILD_FOLDER.match(name):
-            return None
-        base = (fresh().builds_dir / "work").resolve()
-        work = (base / name).resolve()
-        if work.parent != base or not work.is_dir():
-            return None
-        return work
-
-    def read_text(path: Path) -> str | None:
-        if path.is_symlink() or not path.is_file():
-            return None
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return None
-
-    def output_images(work: Path | None) -> list[str]:
-        out = work / "output" if work else None
-        if out is None or _is_link(out) or not out.is_dir():
-            return []
-        return sorted(
-            p.name
-            for p in out.iterdir()
-            if p.is_file()
-            and not p.is_symlink()
-            and p.suffix.lower() in _IMAGE_TYPES
-            and _FILE_NAME.match(p.name)
-        )
+    def build_links(rec: dict) -> dict:
+        """Links to show for a record: the GitHub folder it published, or the live Actions run
+        while it is building. Only https://github.com/ addresses and an integer run id pass."""
+        links: dict = {"url": "", "run_url": ""}
+        url = rec.get("url")
+        if isinstance(url, str) and url.startswith("https://github.com/"):
+            links["url"] = url
+        run_id = rec.get("run_id")
+        repo = fresh().builds.repo
+        if (
+            rec.get("status") == "building"
+            and isinstance(run_id, int)
+            and not isinstance(run_id, bool)
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or "")
+        ):
+            links["run_url"] = f"https://github.com/{repo}/actions/runs/{run_id}"
+        return links
 
     @app.get("/api/builds")
     def list_builds() -> dict:
@@ -467,7 +449,7 @@ def create_app(
             except (OSError, ValueError):
                 continue
             if isinstance(rec, dict):
-                out.append(rec)
+                out.append({**rec, **build_links(rec)})
         job = runner.current
         running = job.summary() if job and job.running and job.action in _BUILD_ACTIONS else None
         return {"builds": out, "job": running}
@@ -491,42 +473,13 @@ def create_app(
     @app.get("/api/builds/{day}")
     def build_detail(day: str) -> dict:
         rec = build_record(day)
-        work = build_work(rec)
-        readme = read_text(work / "README.md") if work else None
-        log = read_text(work / "BUILD_LOG.md") if work else None
         digests = sorted(
             (p.name for p in fresh().digests_dir.glob(f"{day}*") if _DIGEST_NAME.match(p.name)),
         )
         return {
-            "record": rec,
-            "has_folder": work is not None,
-            "readme_html": build_markdown(readme) if readme is not None else None,
-            "log_html": build_markdown(log) if log is not None else None,
-            "images": output_images(work),
+            "record": {**rec, **build_links(rec)},
             "digest": digests[0] if digests else None,
         }
-
-    @app.get("/api/builds/{day}/file/{name:path}")
-    def build_file(day: str, name: str):
-        if not _FILE_NAME.match(name) or name.startswith(".."):
-            raise HTTPException(400, "bad file name")
-        rec = build_record(day)
-        suffix = Path(name).suffix.lower()
-        if suffix not in _IMAGE_TYPES:
-            raise HTTPException(404, "no such image")
-        work = build_work(rec)
-        if work is None:
-            raise HTTPException(404, "no such image")
-        out = work / "output"
-        if _is_link(out) or out.resolve() != work / "output":
-            raise HTTPException(404, "no such image")
-        path = (out / name).resolve()
-        if path.parent != out or (out / name).is_symlink() or not path.is_file():
-            raise HTTPException(404, "no such image")
-        headers = {"X-Content-Type-Options": "nosniff"}
-        if suffix == ".svg":  # a scripted SVG must not run, even when opened on its own
-            headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'"
-        return FileResponse(path, media_type=_IMAGE_TYPES[suffix], headers=headers)
 
     # ---- digests --------------------------------------------------------------------------
     def digest_folder(name: str) -> Path:
@@ -589,26 +542,6 @@ def create_app(
         return FileResponse(audio, media_type=media)
 
     return app
-
-
-def _is_link(path: Path) -> bool:
-    """A symlink, or a Windows junction (which is_symlink does not report)."""
-    return path.is_symlink() or bool(getattr(os.path, "isjunction", lambda p: False)(path))
-
-
-_IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
-_ALT = re.compile(r'\balt="([^"]*)"', re.IGNORECASE)
-
-
-def build_markdown(md: str) -> str:
-    """safe_markdown for build files, which an LLM wrote from web pages: no <img> survives, so a
-    remote image cannot make the panel contact a host the page's author chose."""
-
-    def alt_only(m: re.Match) -> str:
-        alt = _ALT.search(m.group(0))
-        return alt.group(1) if alt else ""
-
-    return _IMG_TAG.sub(alt_only, safe_markdown(md))
 
 
 def _bounded_int(value: Any, lo: int, hi: int) -> int:

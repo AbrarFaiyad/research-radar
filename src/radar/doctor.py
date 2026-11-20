@@ -18,6 +18,7 @@ from .llm import model_tag
 
 TASK_NAME = "ResearchRadarDaily"
 IS_WINDOWS = os.name == "nt"
+DOCS_URL = "https://github.com/AbrarFaiyad/research-radar#daily-builds"
 
 
 @dataclass
@@ -42,6 +43,9 @@ class Probes:
     password: Callable[[str], str | None] = lambda user: _keyring_password(user)
     task_exists: Callable[[str], bool] = lambda name: _task_exists(name)
     repo_visibility: Callable[[str], str | None] = lambda repo: _repo_visibility(repo)
+    gh_scopes: Callable[[], set[str] | None] = lambda: _gh_scopes()
+    workflow_installed: Callable[[str], bool] = lambda repo: _workflow_installed(repo)
+    secret_names: Callable[[str], set[str] | None] = lambda repo: _secret_names(repo)
     playwright_dir: Path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ms-playwright"
 
 
@@ -58,20 +62,53 @@ def _task_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
-def _repo_visibility(repo: str) -> str | None:
+def _gh_json(args: list[str]) -> object | None:
+    """Run gh with the minimal environment; None on any failure."""
+    from .builds import actions
+
     try:
-        proc = subprocess.run(
-            ["gh", "repo", "view", repo, "--json", "visibility"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        proc = actions.gh(args, timeout=30)
         if proc.returncode != 0:
             return None
-        return json.loads(proc.stdout).get("visibility")
+        return json.loads(proc.stdout)
     except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
         return None
+
+
+def _repo_visibility(repo: str) -> str | None:
+    data = _gh_json(["repo", "view", repo, "--json", "visibility"])
+    return data.get("visibility") if isinstance(data, dict) else None
+
+
+def _gh_scopes() -> set[str] | None:
+    from .builds import actions, repo_init
+
+    try:
+        proc = actions.gh(["auth", "status"], timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = "\n".join([proc.stdout or "", proc.stderr or ""])
+    scopes = repo_init._scopes(text)
+    if proc.returncode != 0 and not scopes:
+        return None
+    return scopes
+
+
+def _workflow_installed(repo: str) -> bool:
+    from .builds import actions
+
+    try:
+        proc = actions.gh(["api", f"repos/{repo}/contents/.github/workflows/build.yml"], timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _secret_names(repo: str) -> set[str] | None:
+    data = _gh_json(["secret", "list", "-R", repo, "--json", "name"])
+    if not isinstance(data, list):
+        return None
+    return {str(x.get("name")) for x in data if isinstance(x, dict)}
 
 
 def _dir_has_files(path: Path) -> bool:
@@ -198,8 +235,19 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
 
 
 def _builds_checks(cfg: Config, p: Probes) -> list[Check]:
-    out: list[Check] = []
     repo = cfg.builds.repo
+    scopes = p.gh_scopes()
+    out = [
+        Check(
+            "gh signed in with workflow scope",
+            scopes is not None and "workflow" in scopes,
+            "workflow scope present"
+            if scopes is not None and "workflow" in scopes
+            else ("signed in without it" if scopes is not None else "gh not signed in"),
+            "gh auth login, then gh auth refresh -s workflow",
+            action=DOCS_URL,
+        )
+    ]
     visibility = p.repo_visibility(repo) if repo else None
     out.append(
         Check(
@@ -208,6 +256,25 @@ def _builds_checks(cfg: Config, p: Probes) -> list[Check]:
             repo or "no repo set",
             "create a public GitHub repo and set [builds] repo = owner/name",
             action="https://github.com/new",
+        )
+    )
+    out.append(
+        Check(
+            "workflow installed",
+            bool(repo) and p.workflow_installed(repo),
+            ".github/workflows/build.yml",
+            "press Set up repo in the panel (radar build --init-repo)",
+            action="build-init-repo",
+        )
+    )
+    names = p.secret_names(repo) if repo else None
+    out.append(
+        Check(
+            "Anthropic key secret",
+            names is not None and "ANTHROPIC_API_KEY" in names,
+            "ANTHROPIC_API_KEY stored in the repo",
+            "paste the key on the Setup tab",
+            action="builds-key",
         )
     )
     return out
