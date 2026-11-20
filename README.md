@@ -88,7 +88,7 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
 | Daily builds | `src/radar/builds/` | `select` picks the item, `sandbox` runs Claude in Docker, `run` coordinates the build and the clean-install check, `scan` checks every file for leaks, `publish` pushes to the public repo, `keys` stores the API key |
-| Build image | `docker/` | Builds the sandbox image and the allowlist proxy |
+| Sandbox images | `docker/` | Builds the sandbox image and the allowlist proxy |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
 | Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
 | Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
@@ -243,7 +243,7 @@ You never need the command line after installing; every command here is a button
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
 | `radar daily` | Scan, digest, and email as isolated stages, with a run record | Dashboard, Full daily run |
 | `radar build [folder] [--retry] [--prepare]` | Build and publish the day's demo from a digest. `--retry` runs a day that already has a record again. `--prepare` builds the Docker image and proxy and does not run a build | Daily builds, Retry; Setup, Build image |
-| `radar builds-key` | Store the Anthropic API key for builds (hidden prompt) | Setup, Daily builds key |
+| `radar builds-key` | Store the Anthropic API key for builds (hidden prompt) | Setup, Anthropic API key (daily builds) |
 | `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
 | `radar status` | Database counts, queue size, latest digest, last run | Dashboard |
 | `radar demo` | Classify synthetic posts into `data/demo/` with the local model | Setup, Offline demo |
