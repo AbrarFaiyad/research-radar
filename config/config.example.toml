@@ -71,7 +71,10 @@ mode = "with_digest"      # with_digest | separate
 separate_time = "08:30"   # used when mode = "separate"
 repo = ""                 # owner/name of the GitHub repo that receives the builds
 git_name = ""             # commit author: your GitHub noreply identity
-git_email = ""
+git_email = ""            # must be your GitHub noreply address (...@users.noreply.github.com)
+# Build data (records, logs, work folders, publish clone). Empty = %LOCALAPPDATA%\ResearchRadar\builds
+# on Windows, ~/.local/share/research-radar/builds elsewhere. Keep it out of synced folders.
+work_dir = ""
 image = "research-radar-build:1"
 cpus = 4
 memory_gb = 8

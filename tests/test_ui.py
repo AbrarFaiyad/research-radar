@@ -237,7 +237,7 @@ def _make_build(
 ):
     import json
 
-    builds = client.cfg.data_dir / "builds"
+    builds = client.cfg.builds_dir
     (builds / "records").mkdir(parents=True, exist_ok=True)
     rec = {
         "day": day,
@@ -267,7 +267,7 @@ def _make_build(
 def test_builds_list_newest_first_with_running_job(client):
     _make_build(client, day="2026-11-18", folder="2026-11-18_a_b", work=False)
     _make_build(client, day="2026-11-19")
-    (client.cfg.data_dir / "builds" / "records" / "bad.json").write_text("{", encoding="utf-8")
+    (client.cfg.builds_dir / "records" / "bad.json").write_text("{", encoding="utf-8")
     d = client.get("/api/builds").json()
     assert [b["day"] for b in d["builds"]] == ["2026-11-19", "2026-11-18"] and d["job"] is None
     client.post("/api/jobs", json={"action": "build"}, headers=H)

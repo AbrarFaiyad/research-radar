@@ -36,6 +36,7 @@ INDEX_INTRO = (
 )
 INDEX_HEADER = "| Date | Package | What it shows | License | Ran |"
 INDEX_RULE = "| --- | --- | --- | --- | --- |"
+NOREPLY_SUFFIX = "@users.noreply.github.com"
 LICENSE_RE = re.compile(r"^\W*licen[cs]e\W*[:\-]\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -67,6 +68,9 @@ def _credential_helper() -> str:
 def _prefix(cfg: Config) -> list[str]:
     b = cfg.builds
     pairs = [
+        # The isolated config below cannot carry safe.directory, and a clone in a synced or
+        # differently owned folder would otherwise fail every call with "dubious ownership".
+        f"safe.directory={(cfg.builds_dir / 'repo').as_posix()}",
         f"core.hooksPath={os.devnull}",
         "core.fsmonitor=false",
         "commit.gpgsign=false",
@@ -231,6 +235,8 @@ def publish(
     b = cfg.builds
     if not b.git_name.strip() or not b.git_email.strip():
         raise PublishBlocked("commit identity not set")
+    if not b.git_email.strip().lower().endswith(NOREPLY_SUFFIX):
+        raise PublishBlocked("commit email is not a GitHub noreply address")
     folder = record.folder
     if not FOLDER_RE.match(folder):
         raise PublishBlocked("invalid folder name")

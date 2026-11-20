@@ -425,7 +425,7 @@ def create_app(
         return rec
 
     def build_work(rec: dict) -> Path | None:
-        """The day's work folder, taken from the record and kept inside data/builds/work."""
+        """The day's work folder, taken from the record and kept inside the builds work folder."""
         name = str(rec.get("folder", ""))
         if not _BUILD_FOLDER.match(name):
             return None

@@ -314,7 +314,7 @@ def test_publish_blocked_and_error(on_cfg, digest, result):
 
 
 def test_corrupt_history_skips(on_cfg, digest, result):
-    on_cfg.builds_dir.mkdir(parents=True)
+    on_cfg.builds_dir.mkdir(parents=True, exist_ok=True)
     (on_cfg.builds_dir / "history.json").write_text("{nope", encoding="utf-8")
     rec = go(on_cfg, digest, result)
     assert (rec.status, rec.reason) == ("skipped", "build history file is corrupt")

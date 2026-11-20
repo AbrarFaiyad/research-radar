@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -82,6 +85,7 @@ class BuildsCfg:
     repo: str = ""  # owner/name
     git_name: str = ""
     git_email: str = ""
+    work_dir: str = ""  # empty = default_builds_dir(); relative paths are under the repo root
     image: str = "research-radar-build:1"
     cpus: int = 4
     memory_gb: int = 8
@@ -103,10 +107,25 @@ class BuildsCfg:
             "github.io",
             "api.anthropic.com",
             "registry.npmjs.org",
+            "cas-bridge.xethub.hf.co",
+            "release-assets.githubusercontent.com",
         ]
     )
     claude_model: str = "sonnet"
     max_turns: int = 60
+
+
+def default_builds_dir(windows: bool | None = None, env: Mapping[str, str] | None = None) -> Path:
+    """Build data lives in the user's local app data, outside the repo and any synced folder
+    (Docker Desktop bind mounts of Box Drive folders are unreliable, and sync would upload
+    unscanned work folders and logs)."""
+    windows = os.name == "nt" if windows is None else windows
+    env = os.environ if env is None else env
+    if windows:
+        base = Path(env.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return base / "ResearchRadar" / "builds"
+    base = Path(env.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "research-radar" / "builds"
 
 
 @dataclass
@@ -142,7 +161,15 @@ class Config:
 
     @property
     def builds_dir(self) -> Path:
-        return self.data_dir / "builds"
+        """Records, history, logs, work folders and the publish clone (created on demand)."""
+        raw = self.builds.work_dir.strip()
+        path = Path(raw).expanduser() if raw else default_builds_dir()
+        if not path.is_absolute():
+            path = self.root / path
+        path = path.resolve()
+        with contextlib.suppress(OSError):  # callers that write report their own errors
+            path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def field_profile_text(self) -> str:
         return self.field_profile.read_text(encoding="utf-8")

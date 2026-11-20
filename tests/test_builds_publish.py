@@ -281,3 +281,32 @@ def test_git_env_is_allowlisted(pcfg, tmp_path, monkeypatch):
         assert env["GIT_CONFIG_NOSYSTEM"] == "1"
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["TZ"] == "UTC"
+
+
+def test_email_must_be_github_noreply(pcfg, tmp_path):
+    pcfg.builds.git_email = "owner@gmail.com"
+    with pytest.raises(PublishBlocked, match="commit email is not a GitHub noreply address"):
+        go(pcfg, work(tmp_path), rec())
+
+
+def test_clone_owned_by_someone_else_still_publishes(pcfg, tmp_path, origin):
+    """Box Drive and similar folders look foreign-owned to git; the clone is trusted explicitly."""
+    # The test origin is a local folder, so it looks foreign too; trust it (and only it) in a
+    # global config file. The clone must be trusted by publish itself.
+    trust = tmp_path / "trust-origin.gitconfig"
+    trust.write_text(f"[safe]\n\tdirectory = {origin.as_posix()}\n", encoding="utf-8")
+
+    def foreign(args, cwd, env):
+        env = {**env, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(trust)}
+        return run_git(args, cwd, env)
+
+    go(pcfg, work(tmp_path, "a"), rec(), git=foreign)
+    go(pcfg, work(tmp_path, "b"), rec("2026-11-22"), git=foreign)
+    assert len(index_rows(origin)) == 2
+
+
+def test_prefix_trusts_only_the_clone(pcfg):
+    prefix = publish_mod._prefix(pcfg)
+    trusted = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-c"]
+    safe = [x for x in trusted if x.startswith("safe.directory=")]
+    assert safe == [f"safe.directory={(pcfg.builds_dir / 'repo').as_posix()}"]

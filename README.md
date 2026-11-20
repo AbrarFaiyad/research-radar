@@ -358,10 +358,12 @@ The build uses a dedicated Anthropic API key. Unlike everything else, this key d
 2. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/). It must use the WSL2 engine and be running before you build.
 3. Create a public GitHub repo, for example `daily-builds`.
 4. On the Setup tab, store the Anthropic API key. It goes to Windows Credential Manager, and the panel never shows it again.
-5. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`).
+5. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`, shown at github.com/settings/emails). Settings and the publisher refuse any other address.
 6. On the Setup tab, press **Build image** in the checklist. This builds the sandbox image and the proxy once.
 
 The Daily builds tab then lists every build with its status, README, output, log, and a Retry button.
+
+Build data (records, history, logs, work folders, and the clone of the public repo) is kept outside this repository, in `%LOCALAPPDATA%\ResearchRadar\builds` on Windows and `~/.local/share/research-radar/builds` elsewhere. A sync tool such as Box therefore never uploads unscanned build files, and Docker never mounts a synced folder. Set `work_dir` under `[builds]` to use another folder.
 
 ## Customizing the field
 
