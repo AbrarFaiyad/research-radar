@@ -16,6 +16,8 @@ ACTIONS: dict[str, list[str]] = {
     "scan": ["scan"],
     "digest": ["digest"],
     "podcast": ["podcast"],
+    "podcast-publish": ["podcast", "--publish"],
+    "podcast-init-repo": ["podcast", "--init-repo"],
     "email": ["email"],
     "reclassify": ["reclassify"],
     "doctor": ["doctor"],

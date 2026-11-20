@@ -76,3 +76,10 @@ git_email = ""            # must be your GitHub noreply address (...@users.norep
 # ~/.local/share/research-radar/builds elsewhere. Keep it out of synced folders.
 work_dir = ""
 poll_min = 90             # minutes the daily run waits for the workflow (5-240)
+
+[podcasts]
+# Publish each day's podcast episode as a GitHub Release in a public repo (set it up once with
+# `radar podcast --init-repo`). Only the episode, a title and the kept items' titles and links are
+# published. Off until you set `repo`.
+enabled = false
+repo = ""                 # owner/name of the public GitHub repo that receives the episodes

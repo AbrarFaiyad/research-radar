@@ -122,7 +122,13 @@ def create_app(
                 "--max-posts",
                 str(_bounded_int(payload.get("max_posts", 40), 5, 150)),
             ]
-        if action in ("podcast", "email", "build", "build-retry") and payload.get("folder"):
+        if action in (
+            "podcast",
+            "podcast-publish",
+            "email",
+            "build",
+            "build-retry",
+        ) and payload.get("folder"):
             if not _DIGEST_NAME.match(str(payload["folder"])):
                 raise HTTPException(400, "bad digest name")
             extra = [str(payload["folder"])]

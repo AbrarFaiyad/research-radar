@@ -89,6 +89,12 @@ class BuildsCfg:
     poll_min: int = 90  # how long the daily run waits for the workflow before leaving it
 
 
+@dataclass
+class PodcastsCfg:
+    enabled: bool = False
+    repo: str = ""  # owner/name of the public GitHub repo whose releases hold the episodes
+
+
 def default_builds_dir(windows: bool | None = None, env: Mapping[str, str] | None = None) -> Path:
     """Build data lives in the user's local app data, outside the repo and any synced folder
     (sync would upload records and logs)."""
@@ -114,6 +120,7 @@ class Config:
     notebooklm: NotebookLMCfg
     email: EmailCfg = field(default_factory=EmailCfg)
     builds: BuildsCfg = field(default_factory=BuildsCfg)
+    podcasts: PodcastsCfg = field(default_factory=PodcastsCfg)
     source: Path | None = None  # the TOML file this config came from
 
     @property
@@ -175,5 +182,6 @@ def load_config(path: Path | None = None, root: Path = REPO_ROOT) -> Config:
         notebooklm=_section(raw, "notebooklm", NotebookLMCfg),
         email=_section(raw, "email", EmailCfg),
         builds=_section(raw, "builds", BuildsCfg),
+        podcasts=_section(raw, "podcasts", PodcastsCfg),
         source=path.resolve() if path.exists() else None,
     )

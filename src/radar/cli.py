@@ -1,6 +1,6 @@
 """Research Radar command line.
 
-Pipeline:  scan | reclassify | digest | podcast | email | build | daily
+Pipeline:  scan | reclassify | digest | podcast [--publish] | email | build | daily
 Setup:     onboard | setup | connections | login | notebooklm-login | email-setup | builds-key | doctor
 Inspect:   status | queue | demo | ui
 
@@ -205,6 +205,24 @@ def stage_podcast(cfg: Config, folder_name: str | None = None) -> dict:
     return {"folder": folder.name, "audio": out.name}
 
 
+def stage_podcast_publish(cfg: Config, folder_name: str | None = None) -> dict:
+    """Publish the digest's episode as a GitHub release. A skip raises StageSkipped, a failure
+    RuntimeError; both carry fixed phrases."""
+    from . import podcasts
+
+    folder = cfg.digests_dir / folder_name if folder_name else _latest_digest(cfg)
+    if folder is None or not (folder / "codex_result.json").exists():
+        raise StageSkipped("no new digest to publish")
+    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
+    rec = podcasts.publish(cfg, folder, result)
+    if rec["status"] == "skipped":
+        raise StageSkipped(rec.get("reason", "skipped"))
+    if rec["status"] == "failed":
+        raise RuntimeError(f"podcast publish failed: {rec.get('reason', '')}")
+    print(f"podcast: published {rec.get('page', '')}")
+    return rec
+
+
 def stage_email(
     cfg: Config, folder_name: str | None = None, today_only: bool = False, test: bool = False
 ) -> dict:
@@ -266,6 +284,25 @@ def cmd_digest(cfg, args) -> int:
 
 
 def cmd_podcast(cfg, args) -> int:
+    if args.init_repo:
+        from . import podcasts
+        from .builds.actions import ActionsError
+
+        with RunLock(cfg, owner="podcast"):
+            try:
+                print(f"podcast: repo ready: {podcasts.init_repo(cfg)}")
+            except ActionsError as e:
+                raise UserError(str(e)) from None
+        return 0
+    if args.publish:
+        with RunLock(cfg, owner="podcast"):
+            try:
+                stage_podcast_publish(cfg, args.folder)
+            except StageSkipped as e:
+                print(f"podcast: skipped: {e}")
+            except RuntimeError as e:
+                raise UserError(str(e)) from None
+        return 0
     return _locked(cfg, "podcast", lambda: stage_podcast(cfg, args.folder))
 
 
@@ -466,18 +503,32 @@ def cmd_setup(cfg, args) -> int:
 
 def cmd_daily(cfg, args) -> int:
     build = DailyBuild(cfg) if cfg.builds.enabled and cfg.builds.mode == "with_digest" else None
-    stages = {
-        "scan": lambda: stage_scan(cfg),
-        "digest": lambda: stage_digest(cfg, after_codex=build.start if build else None),
-    }
+    made: dict = {}
+
+    def digest_stage() -> dict:
+        made.update(stage_digest(cfg, after_codex=build.start if build else None))
+        return made
+
+    stages = {"scan": lambda: stage_scan(cfg), "digest": digest_stage}
+    optional: set[str] = set()
+    if cfg.podcasts.enabled:
+
+        def publish_stage() -> dict:
+            if not made.get("folder"):
+                raise StageSkipped("no new digest to publish")
+            return stage_podcast_publish(cfg, made["folder"])
+
+        stages["podcast-publish"] = publish_stage
+        optional.add("podcast-publish")
     if build:
         stages["build"] = build.stage
+        optional.add("build")
     if cfg.email.enabled:  # after the build, so the email can report it
         stages["email"] = lambda: stage_email(cfg, today_only=True)
     with RunLock(cfg, owner="daily"):
         if cfg.builds.enabled and not build:
             _sync_builds(cfg)  # separate mode: the build command syncs too, but not every day
-        rec = run_stages(stages, optional={"build"} if build else set())
+        rec = run_stages(stages, optional=optional)
     path = save_run(cfg, rec)
     print(f"run {'ok' if rec.ok else 'had failures'}: {path}")
     return 0 if rec.ok else 1
@@ -626,6 +677,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc = sub.add_parser("podcast", help="(re)generate the NotebookLM podcast for a digest")
     pc.add_argument(
         "folder", nargs="?", help="digest folder name, e.g. 2026-11-19 (default: latest)"
+    )
+    pc.add_argument(
+        "--publish", action="store_true", help="publish the episode as a GitHub release"
+    )
+    pc.add_argument(
+        "--init-repo", action="store_true", help="create the public podcasts repo if missing"
     )
     sub.add_parser(
         "notebooklm-login", help="sign in to Google once in the agent's NotebookLM browser"

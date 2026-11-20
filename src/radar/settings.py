@@ -115,6 +115,21 @@ SCHEMA: tuple[Field, ...] = (
         message="must be your GitHub noreply address (ending in @users.noreply.github.com)",
     ),
     Field("builds", "poll_min", "int", "Wait for the build workflow (min)", 5, 240),
+    Field(
+        "podcasts",
+        "enabled",
+        "bool",
+        "Publish podcasts to GitHub",
+        help="Each day's episode becomes a release in a public repo. Needs a repo.",
+    ),
+    Field(
+        "podcasts",
+        "repo",
+        "str",
+        "Podcasts GitHub repo (owner/name)",
+        pattern=r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$",
+        message="must look like owner/name",
+    ),
 )
 BY_ID = {f.id: f for f in SCHEMA}
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -199,6 +214,8 @@ def validate(updates: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]
         errors["email.to"] = "is required when email is on"
     if merged.get("builds.enabled") and not merged.get("builds.repo"):
         errors["builds.repo"] = "is required when daily builds are on"
+    if merged.get("podcasts.enabled") and not merged.get("podcasts.repo"):
+        errors["podcasts.repo"] = "is required when podcast publishing is on"
     if errors:
         raise SettingsError(errors)
     return clean

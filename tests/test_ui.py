@@ -177,6 +177,7 @@ def test_schema_covers_every_config_section():
         "notebooklm",
         "email",
         "builds",
+        "podcasts",
     }
 
 

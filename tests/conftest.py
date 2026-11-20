@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from radar.config import BuildsCfg, load_config
+from radar.config import BuildsCfg, PodcastsCfg, load_config
 from radar.db import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -104,6 +104,8 @@ def cfg(tmp_path):
     c.data_dir = tmp_path / "data"
     # never the owner's real builds settings (config.toml may enable them for the real repo)
     c.builds = BuildsCfg(work_dir=str(tmp_path / "builds"))
+    # same for podcast publishing: disabled, never the owner's repo
+    c.podcasts = PodcastsCfg()
     return c
 
 
