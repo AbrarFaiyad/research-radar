@@ -17,7 +17,7 @@ import tomlkit
 class Field:
     section: str
     key: str
-    kind: str  # int | float | bool | str | choice | email
+    kind: str  # int | float | bool | str | choice | email | lines (list of str, one per line)
     label: str
     lo: float | None = None
     hi: float | None = None
@@ -25,6 +25,8 @@ class Field:
     help: str = ""
     pattern: str = ""  # str kinds: a non-empty value must match this regex
     message: str = ""  # shown when the pattern does not match (default: "has the wrong format")
+    advanced: bool = False  # technical key: shown under the section's collapsed Advanced group
+    required: bool = False  # str kinds: an empty value is refused
 
     @property
     def id(self) -> str:
@@ -41,11 +43,19 @@ SCHEMA: tuple[Field, ...] = (
     ),
     Field("scan", "max_posts", "int", "Posts per scan", 1, 300),
     Field("scan", "max_minutes", "float", "Max scan minutes", 1, 60),
-    Field("scan", "pause_s_min", "float", "Min pause between scrolls (s)", 0.5, 60),
-    Field("scan", "pause_s_max", "float", "Max pause between scrolls (s)", 0.5, 120),
-    Field("scan", "scroll_px_min", "int", "Min scroll step (px)", 100, 5000),
-    Field("scan", "scroll_px_max", "int", "Max scroll step (px)", 100, 5000),
-    Field("scan", "stale_steps_stop", "int", "Stop after N scrolls with nothing new", 1, 50),
+    Field("scan", "pause_s_min", "float", "Min pause between scrolls (s)", 0.5, 60, advanced=True),
+    Field("scan", "pause_s_max", "float", "Max pause between scrolls (s)", 0.5, 120, advanced=True),
+    Field("scan", "scroll_px_min", "int", "Min scroll step (px)", 100, 5000, advanced=True),
+    Field("scan", "scroll_px_max", "int", "Max scroll step (px)", 100, 5000, advanced=True),
+    Field(
+        "scan",
+        "stale_steps_stop",
+        "int",
+        "Stop after N scrolls with nothing new",
+        1,
+        50,
+        advanced=True,
+    ),
     Field(
         "browser",
         "headless",
@@ -53,16 +63,62 @@ SCHEMA: tuple[Field, ...] = (
         "Hide the agent browser window",
         help="LinkedIn may challenge headless browsers.",
     ),
+    Field(
+        "browser",
+        "mcp_command",
+        "str",
+        "Browser server command",
+        help="Starts the Playwright MCP server (needs Node.js).",
+        required=True,
+        advanced=True,
+    ),
+    Field(
+        "browser",
+        "mcp_args",
+        "lines",
+        "Browser server arguments",
+        help="One argument per line. The default pins the Playwright MCP version.",
+        advanced=True,
+    ),
+    Field(
+        "browser",
+        "feed_url",
+        "str",
+        "LinkedIn feed address",
+        pattern=r"^https://www\.linkedin\.com/",
+        message="must start with https://www.linkedin.com/",
+        required=True,
+        advanced=True,
+    ),
+    Field(
+        "llm",
+        "host",
+        "str",
+        "Ollama address",
+        pattern=r"^https?://\S+$",
+        message="must start with http:// or https://",
+        required=True,
+        advanced=True,
+    ),
     Field("llm", "model", "str", "Local model (Ollama)"),
-    Field("llm", "num_ctx", "int", "Context window (tokens)", 2048, 262144),
+    Field("llm", "num_ctx", "int", "Context window (tokens)", 2048, 262144, advanced=True),
     Field("llm", "think", "bool", "Let the local model reason first", help="About 3x slower."),
-    Field("llm", "timeout_s", "float", "Local model timeout (s)", 10, 600),
+    Field("llm", "timeout_s", "float", "Local model timeout (s)", 10, 600, advanced=True),
     Field("digest", "min_items", "int", "Codex keeps at least", 1, 50),
     Field("digest", "max_items", "int", "Codex keeps at most", 1, 50),
     Field("digest", "max_candidates", "int", "Max candidates sent to Codex", 1, 300),
     Field("digest", "backlog_days", "float", "Drop saved posts older than (days)", 0.5, 30),
     Field("digest", "web_search", "bool", "Codex web search"),
     Field("digest", "codex_model", "str", "Codex model (empty = default)"),
+    Field(
+        "digest",
+        "codex_command",
+        "str",
+        "Codex command",
+        help="The program that runs Codex.",
+        required=True,
+        advanced=True,
+    ),
     Field("notebooklm", "enabled", "bool", "Make the NotebookLM podcast"),
     Field(
         "notebooklm", "length", "choice", "Podcast length", choices=("shorter", "default", "longer")
@@ -72,6 +128,17 @@ SCHEMA: tuple[Field, ...] = (
     Field("email", "enabled", "bool", "Send the daily email"),
     Field("email", "to", "email", "Send to"),
     Field("email", "sender", "email", "Send from (empty = same)"),
+    Field(
+        "email",
+        "smtp_host",
+        "str",
+        "Mail server",
+        pattern=r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$",
+        message="must be a host name like smtp.gmail.com",
+        required=True,
+        advanced=True,
+    ),
+    Field("email", "smtp_port", "int", "Mail server port", 1, 65535, advanced=True),
     Field("email", "subject_prefix", "str", "Subject prefix"),
     Field(
         "builds",
@@ -115,6 +182,14 @@ SCHEMA: tuple[Field, ...] = (
         message="must be your GitHub noreply address (ending in @users.noreply.github.com)",
     ),
     Field("builds", "poll_min", "int", "Wait for the build workflow (min)", 5, 240),
+    Field(
+        "builds",
+        "work_dir",
+        "str",
+        "Build records folder (empty = default)",
+        help="Keep it out of synced folders. Relative paths are under the repo folder.",
+        advanced=True,
+    ),
     Field(
         "podcasts",
         "enabled",
@@ -178,7 +253,17 @@ def coerce(f: Field, raw: Any) -> Any:
         if (f.lo is not None and num < f.lo) or (f.hi is not None and num > f.hi):
             raise ValueError(f"must be between {f.lo:g} and {f.hi:g}")
         return num
+    if f.kind == "lines":
+        items = raw.splitlines() if isinstance(raw, str) else raw
+        if not isinstance(items, (list, tuple)):
+            raise ValueError("must be a list of lines")
+        out = [str(i).strip() for i in items if str(i).strip()]
+        if len(out) > 50 or any(len(i) > 200 for i in out):
+            raise ValueError("is too long")
+        return out
     text = str(raw if raw is not None else "").strip()
+    if f.required and not text:
+        raise ValueError("is required")
     if f.kind == "choice" and text not in f.choices:
         raise ValueError(f"must be one of {', '.join(f.choices)}")
     if f.kind == "email" and text and not _EMAIL.match(text):
@@ -248,6 +333,7 @@ def schema_json() -> list[dict]:
             "hi": f.hi,
             "choices": list(f.choices),
             "help": f.help,
+            "advanced": f.advanced,
         }
         for f in SCHEMA
     ]
