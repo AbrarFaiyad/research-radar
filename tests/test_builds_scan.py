@@ -278,10 +278,76 @@ def test_png_bad_crc_blocked():
     assert scan.scan_bytes("p.png", bytes(data), []) == [scan.Finding("p.png", "binary")]
 
 
+def _pc(colour, *extra, idat=None):
+    """Like _p but with a chosen IHDR colour type."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, colour, 0, 0, 0))
+        + b"".join(extra)
+        + (idat if idat is not None else _chunk(b"IDAT", zlib.compress(b"\x00\x00")))
+        + _chunk(b"IEND")
+    )
+
+
+def _split(body, n, kind):
+    body = body + b"\x00" * (-len(body) % n)
+    return [_chunk(kind, body[i : i + n]) for i in range(0, len(body), n)]
+
+
 def test_png_key_in_plte_caught():
     pad = b"\x00" * (-len(KEYB) % 3)
-    f = scan.scan_bytes("p.png", _p(_chunk(b"PLTE", KEYB + pad)), [], secrets=[KEYB.decode()])
+    f = scan.scan_bytes("p.png", _pc(2, _chunk(b"PLTE", KEYB + pad)), [], secrets=[KEYB.decode()])
     assert "secret pattern" in _reasons(f)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _pc(2, *_split(KEYB, 3, b"PLTE")),
+        _pc(3, *_split(KEYB, 3, b"PLTE")),
+        _pc(0, *_split(KEYB, 1, b"tRNS")),
+        _pc(3, _chunk(b"PLTE", b"\x00" * 30), *_split(KEYB, 1, b"tRNS")),
+        _pc(2, *_split(b"C:\\Users\\bob\\x", 3, b"PLTE")),
+        _pc(2, *[_chunk(b"PLTE", b"\x01" * 768)] * 10),
+        _pc(2, _chunk(b"PLTE", b"abc"), _chunk(b"PLTE", b"def")),
+        _pc(3, _chunk(b"PLTE", b"abc"), _chunk(b"tRNS", b"\x01"), _chunk(b"tRNS", b"\x01")),
+        _pc(2, idat=_chunk(b"IDAT", zlib.compress(b"\x00\x00")) + _chunk(b"PLTE", b"abc")),
+        _pc(2, _chunk(b"tRNS", b"\x00" * 6), _chunk(b"PLTE", b"abc")),
+        _pc(3, _chunk(b"PLTE", b"abc"), _chunk(b"pHYs", b"\x00" * 9), _chunk(b"pHYs", b"\x00" * 9)),
+        _pc(3),
+        _pc(4, _chunk(b"tRNS", b"\x00\x00")),
+        _pc(6, _chunk(b"tRNS", b"\x00" * 6)),
+        _pc(0, _chunk(b"PLTE", b"abc")),
+        _pc(0, _chunk(b"tRNS", b"\x00")),
+        _pc(3, _chunk(b"PLTE", b"abc"), _chunk(b"tRNS", b"\x00\x00")),
+        _pc(5),
+    ],
+)
+def test_png_structure_blocks(data):
+    f = scan.scan_bytes("p.png", data, [], secrets=[KEYB.decode()])
+    assert [x.reason for x in f] == ["binary"]
+
+
+def test_png_structure_blocks_known_key_split():
+    f = scan.scan_bytes("p.png", _pc(2, *_split(KEYB, 3, b"PLTE")), [], secrets=[KEYB.decode()])
+    assert f
+
+
+def test_normal_palette_and_rgba_pngs_pass():
+    pal = _pc(
+        3,
+        _chunk(b"gAMA", b"\x00" * 4),
+        _chunk(b"PLTE", b"\x01\x02\x03" * 4),
+        _chunk(b"tRNS", b"\xff\x80"),
+        _chunk(b"pHYs", b"\x00" * 9),
+    )
+    assert scan.scan_bytes("p.png", pal, [MARK], secrets=[KEYB.decode()]) == []
+    assert scan.scan_bytes("p.png", _pc(6), [MARK], secrets=[KEYB.decode()]) == []
+    rgb = _pc(
+        2, _chunk(b"sRGB", b"\x00"), _chunk(b"PLTE", b"\x01\x02\x03"), _chunk(b"tRNS", b"\x00" * 6)
+    )
+    assert scan.scan_bytes("p.png", rgb, [MARK]) == []
+    assert scan.scan_bytes("p.png", _pc(0, _chunk(b"tRNS", b"\x00\x00")), []) == []
 
 
 def test_png_key_in_pixels_caught_with_secrets():

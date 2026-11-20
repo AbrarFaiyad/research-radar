@@ -239,25 +239,49 @@ def sanitize_png(data: bytes) -> bytes:
 
 
 def _png_pixels(chunks: list[tuple[bytes, bytes, bytes]]) -> bytes:
-    """Strict structure check; return the inflated pixel stream."""
-    kinds = [k for k, _, _ in chunks]
-    if kinds.count(b"IEND") != 1 or kinds.count(b"IHDR") != 1:
+    """Strict structure check (counts, order, colour-type rules); return the inflated pixels."""
+    if len(chunks) < 3 or chunks[-1][0] != b"IEND":
         raise ValueError("bad chunk order")
-    idat = []
+    colour = chunks[0][1][9]
+    if colour not in (0, 2, 3, 4, 6):
+        raise ValueError("bad colour type")
+    seen: set[bytes] = set()
+    idat: list[bytes] = []
+    palette = 0
     for kind, body, _raw in chunks:
         if kind not in PNG_KEEP:
             raise ValueError("chunk not allowed")
+        if kind == b"IDAT":
+            idat.append(body)
+            continue
+        if kind in seen:
+            raise ValueError("repeated chunk")
+        seen.add(kind)
+        if idat and kind != b"IEND":
+            raise ValueError("chunk after pixel data")
         size = PNG_SIZES.get(kind)
         if size is not None and len(body) != size:
             raise ValueError("bad chunk length")
-        if kind == b"PLTE" and (len(body) % 3 or not 3 <= len(body) <= 768):
-            raise ValueError("bad palette")
-        if kind == b"tRNS" and len(body) > 256:
-            raise ValueError("bad transparency")
-        if kind == b"IDAT":
-            idat.append(body)
+        if kind == b"PLTE":
+            if (
+                b"tRNS" in seen
+                or colour not in (2, 3, 6)
+                or len(body) % 3
+                or not 3 <= len(body) <= 768
+            ):
+                raise ValueError("bad palette")
+            palette = len(body) // 3
+        elif kind == b"tRNS":
+            want = {0: 2, 2: 6}.get(colour)
+            if colour == 3:
+                if not 1 <= len(body) <= palette:
+                    raise ValueError("bad transparency")
+            elif want is None or len(body) != want:
+                raise ValueError("bad transparency")
     if not idat:
         raise ValueError("no pixels")
+    if colour == 3 and b"PLTE" not in seen:
+        raise ValueError("missing palette")
     d = zlib.decompressobj()
     pixels = d.decompress(b"".join(idat), PNG_BUDGET)
     if d.unconsumed_tail or not d.eof or d.unused_data:
@@ -287,9 +311,9 @@ def _png_findings(
         return [Finding(label, "binary")]
     found: list[Finding] = []
     meta = [body for kind, body, _ in chunks if kind != b"IDAT"]
-    if secrets and any(_known_in_bytes(b, secrets) for b in [data, pixels, *meta]):
+    if secrets and any(_known_in_bytes(b, secrets) for b in [data, pixels, b"".join(meta), *meta]):
         found.append(Finding(label, "secret pattern (known key)"))
-    text = " ".join(b.decode("latin-1") for b in meta)
+    text = "".join(b.decode("latin-1") for b in meta)
     long_marks = [m for m in markers if len(m) >= PNG_MARKER_LEN]
     found += _text_findings(label, text, long_marks, (), entropy=False)
     return found
