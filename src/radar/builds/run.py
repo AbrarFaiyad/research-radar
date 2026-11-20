@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -127,7 +128,7 @@ def _container_gone(docker, name: str) -> bool:
     try:
         docker.remove(name)
         return not docker.is_running(name)
-    except (RuntimeError, OSError):
+    except (RuntimeError, OSError, subprocess.TimeoutExpired):
         return False
 
 
@@ -275,7 +276,7 @@ def run_build(
             argv = docker.build_argv(cfg, work, name, env_file=env_file)
             log(f"builds: building {cand.package}")
             code, _output = docker.run_container(argv, b.timeout_min * 60)
-    except (RuntimeError, OSError, ValueError):
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
         return finish("failed", "docker setup failed")
 
     # The container has exited (or must be proven gone); from here the host owns the folder.
@@ -301,7 +302,7 @@ def run_build(
         if _has_special_entry(work):
             return finish("blocked", LINK_REASON)
         verified = vcode != 124 and _read_verify(work)
-    except (RuntimeError, OSError, ValueError):
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
         verified = False
     _clean_work(work)
     if not _has_deliverables(work):

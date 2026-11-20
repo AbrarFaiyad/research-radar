@@ -461,3 +461,84 @@ def test_template_requirements():
     for needle in ("pytest", "test_demo.py", "CPU only", "output/", "BUILD_LOG.md", "real output"):
         assert needle in text
     assert run_mod.TEMPLATE_RE.findall(text) == ["DAY", "FIELD_PROFILE", "ITEM_JSON"]
+
+
+LINK_REASON = "link or special file in the build folder"
+
+
+def _outside(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    return outside
+
+
+def _hard_link(src, dst):
+    try:
+        os.link(src, dst)
+    except (OSError, NotImplementedError):
+        pytest.skip("hard links not available")
+
+
+def test_hard_link_from_build_container_blocks(on_cfg, digest, result, tmp_path):
+    outside = _outside(tmp_path)
+
+    def link(work):
+        good_build(work)
+        _hard_link(outside, work / "linked.txt")
+
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_build=link), publisher=pub)
+    assert (rec.status, rec.reason) == ("blocked", LINK_REASON)
+    assert pub.calls == [] and outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_hard_link_from_verify_container_blocks(on_cfg, digest, result, tmp_path):
+    outside = _outside(tmp_path)
+    pub = FakePublisher()
+    rec = go(
+        on_cfg,
+        digest,
+        result,
+        docker=fake_docker(on_verify=lambda w: _hard_link(outside, w / "linked.txt")),
+        publisher=pub,
+    )
+    assert (rec.status, rec.reason) == ("blocked", LINK_REASON)
+    assert pub.calls == [] and outside.read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows only")
+def test_junction_from_build_container_blocks(on_cfg, digest, result, tmp_path):
+    import _winapi
+
+    target = tmp_path / "target_dir"
+    target.mkdir()
+    (target / "secret.txt").write_text("outside", encoding="utf-8")
+
+    def junction(work):
+        good_build(work)
+        _winapi.CreateJunction(str(target), str(work / "jn"))
+
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=fake_docker(on_build=junction), publisher=pub)
+    assert (rec.status, rec.reason) == ("blocked", LINK_REASON)
+    assert pub.calls == [] and (target / "secret.txt").read_text(encoding="utf-8") == "outside"
+
+
+def test_docker_timeout_checking_container_fails_cleanly(on_cfg, digest, result):
+    import subprocess
+
+    def hung(name):
+        raise subprocess.TimeoutExpired(["docker"], 30)
+
+    def noisy(work):
+        good_build(work)
+        (work / ".logs" / "claude.log").write_text(KEY, encoding="utf-8")
+
+    docker = fake_docker(on_build=noisy)
+    docker.is_running = hung
+    pub = FakePublisher()
+    rec = go(on_cfg, digest, result, docker=docker, publisher=pub)
+    assert (rec.status, rec.reason) == ("failed", "build container did not stop")
+    assert pub.calls == []
+    assert not (on_cfg.builds_dir / "work" / rec.folder).exists()
+    assert not _tree_has(on_cfg.builds_dir, KEY.encode())

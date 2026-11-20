@@ -245,3 +245,11 @@ def test_remove_and_is_running():
     assert sandbox.is_running("c1", rec) is True
     assert sandbox.is_running("c1", Recorder(lambda a: _proc(0, "false\n"))) is False
     assert sandbox.is_running("c1", Recorder(lambda a: _proc(1, "", "no such"))) is False
+
+
+def test_remove_and_is_running_survive_timeouts():
+    def hang(argv):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    sandbox.remove("c1", Recorder(hang))
+    assert sandbox.is_running("c1", Recorder(hang)) is True

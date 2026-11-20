@@ -186,10 +186,15 @@ def run_container(argv: list[str], timeout_s: float, run=subprocess.run) -> tupl
 
 
 def remove(name: str, run=subprocess.run) -> None:
-    """Force-remove a container; a missing one is fine."""
-    _run(run, ["docker", "rm", "-f", name], timeout=60)
+    """Force-remove a container; a missing one is fine, and so is a daemon that times out."""
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        _run(run, ["docker", "rm", "-f", name], timeout=60)
 
 
 def is_running(name: str, run=subprocess.run) -> bool:
-    proc = _run(run, ["docker", "inspect", "-f", "{{.State.Running}}", name], timeout=30)
+    """True if the container runs, or if that cannot be determined (timeout)."""
+    try:
+        proc = _run(run, ["docker", "inspect", "-f", "{{.State.Running}}", name], timeout=30)
+    except subprocess.TimeoutExpired:
+        return True
     return proc.returncode == 0 and proc.stdout.strip() == "true"
