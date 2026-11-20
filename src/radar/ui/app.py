@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import re
 import secrets
 import webbrowser
@@ -444,7 +445,7 @@ def create_app(
 
     def output_images(work: Path | None) -> list[str]:
         out = work / "output" if work else None
-        if out is None or out.is_symlink() or not out.is_dir():
+        if out is None or _is_link(out) or not out.is_dir():
             return []
         return sorted(
             p.name
@@ -495,8 +496,8 @@ def create_app(
         return {
             "record": rec,
             "has_folder": work is not None,
-            "readme_html": safe_markdown(readme) if readme is not None else None,
-            "log_html": safe_markdown(log) if log is not None else None,
+            "readme_html": build_markdown(readme) if readme is not None else None,
+            "log_html": build_markdown(log) if log is not None else None,
             "images": output_images(work),
             "digest": digests[0] if digests else None,
         }
@@ -512,7 +513,9 @@ def create_app(
         work = build_work(rec)
         if work is None:
             raise HTTPException(404, "no such image")
-        out = (work / "output").resolve()
+        out = work / "output"
+        if _is_link(out) or out.resolve() != work / "output":
+            raise HTTPException(404, "no such image")
         path = (out / name).resolve()
         if path.parent != out or (out / name).is_symlink() or not path.is_file():
             raise HTTPException(404, "no such image")
@@ -582,6 +585,26 @@ def create_app(
         return FileResponse(audio, media_type=media)
 
     return app
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or a Windows junction (which is_symlink does not report)."""
+    return path.is_symlink() or bool(getattr(os.path, "isjunction", lambda p: False)(path))
+
+
+_IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_ALT = re.compile(r'\balt="([^"]*)"', re.IGNORECASE)
+
+
+def build_markdown(md: str) -> str:
+    """safe_markdown for build files, which an LLM wrote from web pages: no <img> survives, so a
+    remote image cannot make the panel contact a host the page's author chose."""
+
+    def alt_only(m: re.Match) -> str:
+        alt = _ALT.search(m.group(0))
+        return alt.group(1) if alt else ""
+
+    return _IMG_TAG.sub(alt_only, safe_markdown(md))
 
 
 def _bounded_int(value: Any, lo: int, hi: int) -> int:

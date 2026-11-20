@@ -367,3 +367,49 @@ def test_page_has_builds_tab_and_key_field(client):
         "build-image",
     ):
         assert needle in html
+
+
+def test_build_file_refuses_linked_output_dir(client, tmp_path):
+    import os
+
+    builds = _make_build(client)
+    out = builds / "work" / "2026-11-19_pkg_task" / "output"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "leak.png").write_bytes(b"PNG leak")
+    shutil.rmtree(out)
+    try:
+        os.symlink(elsewhere, out, target_is_directory=True)
+    except OSError:
+        pytest.skip("cannot create symlinks here")
+    assert client.get("/api/builds/2026-11-19/file/leak.png").status_code == 404
+    assert client.get("/api/builds/2026-11-19").json()["images"] == []
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="junctions are Windows only")
+def test_build_file_refuses_junction_output_dir(client, tmp_path):
+    import _winapi
+
+    builds = _make_build(client)
+    out = builds / "work" / "2026-11-19_pkg_task" / "output"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "leak.png").write_bytes(b"PNG leak")
+    shutil.rmtree(out)
+    _winapi.CreateJunction(str(elsewhere), str(out))
+    assert client.get("/api/builds/2026-11-19/file/leak.png").status_code == 404
+    assert client.get("/api/builds/2026-11-19").json()["images"] == []
+
+
+def test_build_markdown_drops_remote_images(client):
+    builds = _make_build(client)
+    (builds / "work" / "2026-11-19_pkg_task" / "README.md").write_text(
+        "hi ![chart](https://evil.example/t.png) <img src='https://evil.example/x.png'>",
+        encoding="utf-8",
+    )
+    (builds / "work" / "2026-11-19_pkg_task" / "BUILD_LOG.md").write_text(
+        "![](http://evil.example/p.gif)", encoding="utf-8"
+    )
+    d = client.get("/api/builds/2026-11-19").json()
+    assert "<img" not in d["readme_html"] and "<img" not in d["log_html"]
+    assert "evil.example" not in d["log_html"] and "chart" in d["readme_html"]
