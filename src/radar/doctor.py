@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ from .config import Config
 from .llm import model_tag
 
 TASK_NAME = "ResearchRadarDaily"
+IS_WINDOWS = os.name == "nt"
 
 
 @dataclass
@@ -39,6 +41,11 @@ class Probes:
     http_get: Callable[[str], dict] = lambda url: httpx.get(url, timeout=4).json()
     password: Callable[[str], str | None] = lambda user: _keyring_password(user)
     task_exists: Callable[[str], bool] = lambda name: _task_exists(name)
+    wsl_ok: Callable[[], bool] = lambda: _wsl_ok()
+    docker_ok: Callable[[], tuple[bool, str]] = lambda: _docker_ok()
+    image_exists: Callable[[Config], bool] = lambda cfg: _image_exists(cfg)
+    api_key: Callable[[], str | None] = lambda: _api_key()
+    repo_visibility: Callable[[str], str | None] = lambda repo: _repo_visibility(repo)
     playwright_dir: Path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ms-playwright"
 
 
@@ -53,6 +60,52 @@ def _task_exists(name: str) -> bool:
         return False
     proc = subprocess.run(["schtasks", "/Query", "/TN", name], capture_output=True, check=False)
     return proc.returncode == 0
+
+
+def _wsl_ok() -> bool:
+    try:
+        return subprocess.run(["wsl", "--status"], capture_output=True, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _docker_ok() -> tuple[bool, str]:
+    from .builds.sandbox import docker_ready
+
+    return docker_ready()
+
+
+def _image_exists(cfg: Config) -> bool:
+    from .builds.sandbox import image_exists
+
+    return image_exists(cfg)
+
+
+def _api_key() -> str | None:
+    import keyring.errors
+
+    from .builds.keys import get_key
+
+    try:
+        return get_key()
+    except keyring.errors.KeyringError:  # no usable backend: same as no key
+        return None
+
+
+def _repo_visibility(repo: str) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["gh", "repo", "view", repo, "--json", "visibility"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        return json.loads(proc.stdout).get("visibility")
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return None
 
 
 def _dir_has_files(path: Path) -> bool:
@@ -161,6 +214,8 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
                 action="email-password",
             )
         )
+    if cfg.builds.enabled:
+        out += _builds_checks(cfg, p)
     out.append(
         Check(
             "daily schedule",
@@ -173,6 +228,63 @@ def run_checks(cfg: Config, probes: Probes | None = None) -> list[Check]:
     )
     for c in out:
         c.detail = mask(c.detail, cfg.root)
+    return out
+
+
+def _builds_checks(cfg: Config, p: Probes) -> list[Check]:
+    out: list[Check] = []
+    if IS_WINDOWS:
+        wsl = p.wsl_ok()
+        out.append(
+            Check(
+                "WSL2",
+                wsl,
+                "ready" if wsl else "not available",
+                "wsl --install, then restart Windows",
+                action="https://learn.microsoft.com/windows/wsl/install",
+            )
+        )
+    docker, docker_detail = p.docker_ok()
+    out.append(
+        Check(
+            "Docker",
+            docker,
+            "ready" if docker else docker_detail,
+            "install and start Docker Desktop (WSL2 engine)",
+            action="https://www.docker.com/products/docker-desktop/",
+        )
+    )
+    image = docker and p.image_exists(cfg)
+    out.append(
+        Check(
+            "build image",
+            image,
+            cfg.builds.image if image else f"{cfg.builds.image} not built",
+            "radar build --prepare",
+            action="build-image",
+        )
+    )
+    has_key = bool(p.api_key())
+    out.append(
+        Check(
+            "Anthropic API key",
+            has_key,
+            "stored" if has_key else "not set",
+            "paste the key in the daily builds panel",
+            action="builds-key",
+        )
+    )
+    repo = cfg.builds.repo
+    visibility = p.repo_visibility(repo) if repo else None
+    out.append(
+        Check(
+            "daily-builds repo",
+            visibility == "PUBLIC",
+            repo or "no repo set",
+            "create a public GitHub repo and set [builds] repo = owner/name",
+            action="https://github.com/new",
+        )
+    )
     return out
 
 

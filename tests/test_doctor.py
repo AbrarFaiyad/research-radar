@@ -75,3 +75,86 @@ def test_model_tag_must_match(cfg, tmp_path):
     assert not checks["local model"].ok  # only :latest is installed
     cfg.llm.model = "mimo-v2.6"
     assert _by_name(run_checks(cfg, _probes(tmp_path)))["local model"].ok
+
+
+def _builds_probes(tmp_path, **kw):
+    base = {
+        "wsl_ok": lambda: True,
+        "docker_ok": lambda: (True, ""),
+        "image_exists": lambda cfg: True,
+        "api_key": lambda: "sk-test",
+        "repo_visibility": lambda repo: "PUBLIC",
+    }
+    base.update(kw)
+    return _probes(tmp_path, **base)
+
+
+def test_builds_checks_absent_when_disabled(cfg, tmp_path):
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    for name in ("WSL2", "Docker", "build image", "Anthropic API key", "daily-builds repo"):
+        assert name not in checks
+
+
+def test_builds_checks_present_with_actions(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr("radar.doctor.IS_WINDOWS", True)
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+    checks = _by_name(
+        run_checks(
+            cfg,
+            _builds_probes(
+                tmp_path,
+                wsl_ok=lambda: False,
+                docker_ok=lambda: (False, "docker not running"),
+                image_exists=lambda c: False,
+                api_key=lambda: None,
+                repo_visibility=lambda r: "PRIVATE",
+            ),
+        )
+    )
+    assert checks["WSL2"].action == "https://learn.microsoft.com/windows/wsl/install"
+    assert checks["Docker"].action == "https://www.docker.com/products/docker-desktop/"
+    assert checks["Docker"].detail == "docker not running"
+    assert checks["build image"].action == "build-image"
+    assert checks["Anthropic API key"].action == "builds-key"
+    assert checks["daily-builds repo"].action == "https://github.com/new"
+    assert not any(
+        checks[n].ok
+        for n in ("WSL2", "Docker", "build image", "Anthropic API key", "daily-builds repo")
+    )
+
+
+def test_wsl_check_omitted_off_windows(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr("radar.doctor.IS_WINDOWS", False)
+    cfg.builds.enabled = True
+    assert "WSL2" not in _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+
+
+def test_builds_checks_green_and_key_not_leaked(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr("radar.doctor.IS_WINDOWS", True)
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    for name in ("WSL2", "Docker", "build image", "Anthropic API key", "daily-builds repo"):
+        assert checks[name].ok, name
+    assert "sk-test" not in checks["Anthropic API key"].detail
+
+
+def test_repo_check_needs_repo_set(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, ""
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    assert not checks["daily-builds repo"].ok
+
+
+def test_image_exists_uses_minimal_env_runner(cfg):
+    from types import SimpleNamespace
+
+    from radar.builds import sandbox
+
+    seen = {}
+
+    def run(argv, **kw):
+        seen["argv"], seen["env"] = argv, kw["env"]
+        return SimpleNamespace(returncode=0)
+
+    assert sandbox.image_exists(cfg, run)
+    assert seen["argv"] == ["docker", "image", "inspect", cfg.builds.image]
+    assert "ANTHROPIC_API_KEY" not in seen["env"]

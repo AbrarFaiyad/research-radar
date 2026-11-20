@@ -8,6 +8,7 @@ once with `radar email-setup`.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import mimetypes
 import smtplib
 import ssl
@@ -81,6 +82,21 @@ def build_message(
     return msg
 
 
+def _build_line(digest_folder: Path) -> str:
+    """One line about the day's build, from build.json only; nothing else in it is used."""
+    try:
+        data = json.loads((digest_folder / "build.json").read_text(encoding="utf-8"))
+        status = data.get("status")
+        if status in ("published", "did_not_run"):
+            line = f"**Daily build:** {data['package']} → {data['url']}"
+            return line + (" (did not run; see its README)" if status == "did_not_run" else "")
+        if status in ("skipped", "failed", "blocked"):
+            return f"Daily build skipped: {data.get('reason', '')}".rstrip(": ")
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    return ""
+
+
 def compose_daily(
     cfg: EmailCfg, digest_folder: Path | None, queue_dir: Path, today: dt.date | None = None
 ) -> EmailMessage:
@@ -95,6 +111,9 @@ def compose_daily(
                 f"**Podcast:** attached, and playable in NotebookLM: "
                 f"<{link_file.read_text(encoding='utf-8').strip()}>"
             )
+        build_line = _build_line(digest_folder)
+        if build_line:
+            parts.append(build_line)
         parts.append((digest_folder / "summary.md").read_text(encoding="utf-8"))
         audio = sorted(
             digest_folder.glob("episode.*"),

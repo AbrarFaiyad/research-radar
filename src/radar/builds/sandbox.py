@@ -122,8 +122,17 @@ def ensure_network_and_proxy(cfg, run=subprocess.run) -> None:
     _check(_run(run, ["docker", "network", "connect", "bridge", PROXY]), "proxy bridge")
 
 
+def image_exists(cfg, run=subprocess.run) -> bool:
+    try:
+        return (
+            _run(run, ["docker", "image", "inspect", cfg.builds.image], timeout=30).returncode == 0
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def ensure_image(cfg, run=subprocess.run) -> None:
-    if _run(run, ["docker", "image", "inspect", cfg.builds.image]).returncode == 0:
+    if image_exists(cfg, run):
         return
     build = ["docker", "build", "-t", cfg.builds.image, str(DOCKER_DIR / "build")]
     _check(_run(run, build), "image build")
