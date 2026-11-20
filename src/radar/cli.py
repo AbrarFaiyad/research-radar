@@ -86,7 +86,10 @@ def _audio_maker(cfg: Config):
     return lambda folder, result: make_audio(cfg, folder, result)
 
 
-BUILD_JOIN_GRACE_MIN = 10  # the daily run waits this long beyond the container time limit
+# The daily run waits for the build: container limit + verify run + setup and publish, then a
+# further grace period before it force-removes the containers and gives up.
+BUILD_SETUP_MIN = 15
+BUILD_KILL_GRACE_MIN = 10
 
 
 class DailyBuild:
@@ -99,6 +102,7 @@ class DailyBuild:
         self.cfg = cfg
         self.thread: threading.Thread | None = None
         self.record = None
+        self.containers: list[str] = []
         self.day = dt.date.today().isoformat()
 
     def start(self, folder: Path, result: dict) -> None:
@@ -114,7 +118,12 @@ class DailyBuild:
 
         try:
             self.record = build_run.run_build(
-                self.cfg, folder, result, api_key=keys.get_key(), log=print
+                self.cfg,
+                folder,
+                result,
+                api_key=keys.get_key(),
+                log=print,
+                containers=self.containers,
             )
         except Exception as e:  # noqa: BLE001 - a build must never break the daily run
             print(f"builds: crashed: {e.__class__.__name__}")
@@ -125,7 +134,19 @@ class DailyBuild:
 
         if self.thread is None:
             raise StageSkipped("no new digest to build from")
-        self.thread.join((self.cfg.builds.timeout_min + BUILD_JOIN_GRACE_MIN) * 60)
+        from .builds import sandbox
+        from .builds.run import VERIFY_TIMEOUT_MIN
+
+        budget_min = self.cfg.builds.timeout_min + VERIFY_TIMEOUT_MIN + BUILD_SETUP_MIN
+        self.thread.join(max(budget_min, 0) * 60)
+        if self.thread.is_alive():  # keep the run lock while it winds down
+            self.thread.join(max(BUILD_KILL_GRACE_MIN, 0) * 60)
+        if self.thread.is_alive():
+            for name in self.containers:
+                try:
+                    sandbox.remove(name)
+                except Exception:  # noqa: BLE001, S110 - best effort
+                    pass
         record = self.record
         if self.thread.is_alive() or record is None:
             record = BuildRecord(self.day, "failed", reason="build did not finish")

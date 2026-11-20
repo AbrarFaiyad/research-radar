@@ -111,21 +111,38 @@ def test_build_gets_a_copy_of_the_result(cfg, monkeypatch):
     assert stage["ok"] and stage["skipped"] and stage["error"] == "no API key"
 
 
-def test_build_that_never_finishes_is_recorded(cfg, monkeypatch):
-    release = threading.Event()
-
+def test_slow_build_inside_budget_keeps_its_status(cfg, monkeypatch):
     def build(*a, **kw):
+        threading.Event().wait(0.3)
+        return BuildRecord(day="d", status="published", package="p")
+
+    daily_setup(cfg, monkeypatch, build)
+    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.timeout_min - 15 + 0.01)  # 0.6 s
+    cli.cmd_daily(cfg, SimpleNamespace())
+    stage = latest_run(cfg)["stages"][2]
+    assert stage["ok"] and stage["detail"]["status"] == "published"
+
+
+def test_build_that_never_finishes_is_removed_and_recorded(cfg, monkeypatch):
+    release = threading.Event()
+    removed = []
+
+    def build(cfg_, folder, result, **kw):
+        kw["containers"].extend(["radar-build-x", "radar-build-x-verify"])
         release.wait(10)
         return BuildRecord(day="d", status="published")
 
     daily_setup(cfg, monkeypatch, build)
-    monkeypatch.setattr(cli, "BUILD_JOIN_GRACE_MIN", -cfg.builds.timeout_min + 0.001)
+    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.timeout_min - 15 + 0.001)
+    monkeypatch.setattr(cli, "BUILD_KILL_GRACE_MIN", 0.002)
+    monkeypatch.setattr(sandbox_mod, "remove", removed.append)
     try:
         cli.cmd_daily(cfg, SimpleNamespace())
     finally:
         release.set()
     stage = latest_run(cfg)["stages"][2]
     assert not stage["ok"] and "build did not finish" in stage["error"]
+    assert removed == ["radar-build-x", "radar-build-x-verify"]
 
 
 def test_separate_mode_skips_build_in_daily(cfg, monkeypatch):

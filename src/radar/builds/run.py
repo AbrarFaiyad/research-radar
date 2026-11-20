@@ -22,7 +22,8 @@ from radar.builds import sandbox
 from radar.builds.scan import personal_markers, sanitize_png, scan_bytes, scan_tree
 from radar.builds.select import History, HistoryCorrupt, folder_name, pick
 
-VERIFY_TIMEOUT_S = 15 * 60
+VERIFY_TIMEOUT_MIN = 15
+VERIFY_TIMEOUT_S = VERIFY_TIMEOUT_MIN * 60
 BANNER = (
     "> **DID NOT RUN.** The demo's requirements did not install or its smoke test did not pass "
     "in a clean container. Treat everything below as unverified.\n\n"
@@ -197,7 +198,10 @@ def run_build(
     publisher: Callable | None = None,
     today: dt.date | None = None,
     log: Callable = print,
+    containers: list[str] | None = None,
 ) -> BuildRecord:
+    """`containers`, when given, receives the container names as they are chosen, so a caller
+    that gives up waiting can force-remove them."""
     start = time.monotonic()
     day = (today or dt.date.today()).isoformat()
     cand = None
@@ -269,6 +273,8 @@ def run_build(
         return finish("failed", "could not prepare the build folder")
 
     name = f"radar-build-{folder}"
+    if containers is not None:
+        containers.extend([name, name + "-verify"])
     try:
         docker.ensure_network_and_proxy(cfg)
         docker.ensure_image(cfg)
