@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff==0.17.6", "numpy>=1.26"]
+dev = ["pytest>=8", "ruff==0.17.6", "numpy>=1.26", "pyyaml>=6"]
 
 [project.scripts]
 radar = "radar.cli:main"

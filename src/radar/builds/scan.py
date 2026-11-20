@@ -22,9 +22,11 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
-from radar.config import Config
+if TYPE_CHECKING:  # scan.py is vendored standalone into the workflow repo
+    from radar.config import Config
 
 ARCHIVE_EXT = frozenset(
     {".zip", ".tar", ".gz", ".7z", ".whl", ".egg", ".pkl", ".pt", ".npz", ".h5"}
