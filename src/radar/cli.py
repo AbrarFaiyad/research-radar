@@ -87,10 +87,9 @@ def _audio_maker(cfg: Config):
     return lambda folder, result: make_audio(cfg, folder, result)
 
 
-# The daily run waits for the build: container limit + verify run + setup and publish, then a
-# further grace period before it force-removes the containers and gives up.
-BUILD_SETUP_MIN = 15
-BUILD_KILL_GRACE_MIN = 10
+# The daily run waits for the workflow up to `builds.poll_min`, plus setup and a grace period;
+# a run still going after that stays `building` and `radar build --sync` finishes it later.
+BUILD_SETUP_MIN = 10
 
 
 class DailyBuild:
@@ -103,7 +102,6 @@ class DailyBuild:
         self.cfg = cfg
         self.thread: threading.Thread | None = None
         self.record = None
-        self.containers: list[str] = []
         self.day = dt.date.today().isoformat()
 
     def start(self, folder: Path, result: dict) -> None:
@@ -114,18 +112,14 @@ class DailyBuild:
         self.thread.start()
 
     def _run(self, folder: Path, result: dict) -> None:
-        from .builds import keys
         from .builds import run as build_run
 
+        try:  # finish yesterday's unfinished builds first; a failure here never stops today's
+            build_run.sync_builds(self.cfg, log=print)
+        except Exception as e:  # noqa: BLE001
+            print(f"builds: sync crashed: {e.__class__.__name__}")
         try:
-            self.record = build_run.run_build(
-                self.cfg,
-                folder,
-                result,
-                api_key=keys.get_key(),
-                log=print,
-                containers=self.containers,
-            )
+            self.record = build_run.run_build(self.cfg, folder, result, log=print)
         except Exception as e:  # noqa: BLE001 - a build must never break the daily run
             print(f"builds: crashed: {e.__class__.__name__}")
             self.record = build_run.BuildRecord(self.day, "failed", reason="build crashed")
@@ -135,22 +129,18 @@ class DailyBuild:
 
         if self.thread is None:
             raise StageSkipped("no new digest to build from")
-        from .builds import sandbox
-        from .builds.run import VERIFY_TIMEOUT_MIN
-
-        budget_min = self.cfg.builds.timeout_min + VERIFY_TIMEOUT_MIN + BUILD_SETUP_MIN
+        budget_min = self.cfg.builds.poll_min + BUILD_SETUP_MIN
         self.thread.join(max(budget_min, 0) * 60)
-        if self.thread.is_alive():  # keep the run lock while it winds down
-            self.thread.join(max(BUILD_KILL_GRACE_MIN, 0) * 60)
-        if self.thread.is_alive():
-            for name in self.containers:
-                try:
-                    sandbox.remove(name)
-                except Exception:  # noqa: BLE001, S110 - best effort
-                    pass
         record = self.record
         if self.thread.is_alive() or record is None:
-            record = BuildRecord(self.day, "failed", reason="build did not finish")
+            # Not finished: keep the run if one was started (sync finishes it later).
+            from .builds.run import read_record
+
+            started = read_record(self.cfg, self.day)
+            if started is not None and started.status == "building" and started.run_id:
+                record = started
+            else:
+                record = BuildRecord(self.day, "failed", reason="build did not finish")
         if record.status == "skipped":
             raise StageSkipped(record.reason)
         if record.status in ("failed", "blocked"):
@@ -279,7 +269,6 @@ def cmd_email(cfg, args) -> int:
 BUILD_LOCK_POLL_S = 60
 BUILD_LOCK_WAIT_S = 2 * 3600
 DAILY_BUSY = "daily run still in progress"
-KEY_UNAVAILABLE = "API key unavailable"
 
 
 def _build_lock(cfg: Config, wait_for_daily: bool) -> RunLock | None:
@@ -306,18 +295,25 @@ def _print_build(rec) -> None:
 
 
 def cmd_build(cfg, args) -> int:
-    from .builds import keys, sandbox
+    from .builds import repo_init
     from .builds import run as build_run
+    from .builds.actions import ActionsError
 
-    if args.prepare:
-        ready, why = sandbox.docker_ready()
-        if not ready:
-            raise UserError(why)
+    if args.init_repo:
         with RunLock(cfg, owner="build"):
-            sandbox.ensure_network_and_proxy(cfg)
-            sandbox.ensure_image(cfg)
-        print("build network, proxy, and image are ready")
+            try:
+                print(f"build: daily-builds repo ready: {repo_init.init_repo(cfg)}")
+            except ActionsError as e:
+                raise UserError(str(e)) from None
         return 0
+    if args.sync:
+        with RunLock(cfg, owner="build"):
+            finished = build_run.sync_builds(cfg)
+        for rec in finished:
+            _print_build(rec)
+        if not finished:
+            print("build: nothing to sync")
+        return 1 if any(r.status in ("failed", "blocked") for r in finished) else 0
     # The scheduled build of separate mode builds from today's digest only.
     separate = cfg.builds.mode == "separate" and not args.folder and not args.retry
     today = dt.date.today().isoformat()
@@ -339,17 +335,12 @@ def cmd_build(cfg, args) -> int:
         print(f"build: {folder.name} already has a record ({status}); use --retry to run again")
         return 0
     result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
-    try:
-        api_key = keys.get_key()
-    except Exception:  # noqa: BLE001 - a broken credential store is a skip, not a traceback
-        _print_build(build_run.record_skip(cfg, today, KEY_UNAVAILABLE, folder))
-        return 0
     lock = _build_lock(cfg, wait_for_daily=separate)
     if lock is None:
         _print_build(build_run.record_skip(cfg, today, DAILY_BUSY, folder))
         return 0
     try:
-        rec = build_run.run_build(cfg, folder, result, api_key=api_key)
+        rec = build_run.run_build(cfg, folder, result)
     finally:
         lock.__exit__(None, None, None)
     _print_build(rec)
@@ -359,14 +350,20 @@ def cmd_build(cfg, args) -> int:
 def cmd_builds_key(cfg, args) -> int:
     import getpass
 
-    from .builds import keys
+    from .builds import repo_init
+    from .builds.actions import ActionsError
 
     print("Paste the Anthropic API key for daily builds (input is hidden).")
     key = "".join(getpass.getpass("API key: ").split())
     if not key:
         raise UserError("No key entered.")
-    keys.set_key(key)
-    print("Saved in Windows Credential Manager. Run the first build with `radar build --retry`.")
+    try:
+        repo_init.set_secret(cfg, key)
+    except ActionsError as e:
+        raise UserError(str(e)) from None
+    print(
+        "Saved as the repo secret ANTHROPIC_API_KEY. Run the first build with `radar build --retry`."
+    )
     return 0
 
 
@@ -623,11 +620,14 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     em.add_argument("--today-only", action="store_true", help="skip digests from earlier days")
     em.add_argument("--test", action="store_true", help="send a short test message only")
-    sub.add_parser("builds-key", help="store the Anthropic API key for daily builds")
+    sub.add_parser("builds-key", help="store the Anthropic API key as the builds repo secret")
     bd = sub.add_parser("build", help="build the day's learning demo from a digest and publish it")
     bd.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     bd.add_argument("--retry", action="store_true", help="run again for a day that has a record")
-    bd.add_argument("--prepare", action="store_true", help="set up the Docker network and image")
+    bd.add_argument("--sync", action="store_true", help="finish builds that were still running")
+    bd.add_argument(
+        "--init-repo", action="store_true", help="write the workflow files into the builds repo"
+    )
     ob = sub.add_parser("onboard", help="set up the field profile from a CV (the panel's wizard)")
     ob.add_argument("step", choices=["draft", "calibrate", "refine"])
     ob.add_argument("--source", choices=["live", "stored"], default="live")

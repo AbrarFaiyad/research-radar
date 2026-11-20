@@ -114,11 +114,7 @@ SCHEMA: tuple[Field, ...] = (
         pattern=r"^[^@\s]+@users\.noreply\.github\.com$",
         message="must be your GitHub noreply address (ending in @users.noreply.github.com)",
     ),
-    Field("builds", "cpus", "int", "Build CPUs", 1, 16),
-    Field("builds", "memory_gb", "int", "Build memory (GB)", 1, 64),
-    Field("builds", "timeout_min", "int", "Build time limit (min)", 5, 240),
-    Field("builds", "max_file_mb", "float", "Max file size (MB)", 0.1, 50),
-    Field("builds", "max_folder_mb", "float", "Max build folder size (MB)", 1, 200),
+    Field("builds", "poll_min", "int", "Wait for the build workflow (min)", 5, 240),
 )
 BY_ID = {f.id: f for f in SCHEMA}
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")

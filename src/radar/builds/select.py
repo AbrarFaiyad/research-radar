@@ -29,7 +29,7 @@ OSI_LICENSES = frozenset(
     }
 )
 
-# Privacy boundary: only these item keys may ever reach the sandbox.
+# Privacy boundary: only these item keys may ever reach the workflow.
 PUBLIC_KEYS = (
     "title",
     "kind",

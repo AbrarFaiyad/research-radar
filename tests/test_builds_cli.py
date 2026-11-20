@@ -7,9 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from radar import cli, settings
-from radar.builds import keys
 from radar.builds import run as run_mod
-from radar.builds import sandbox as sandbox_mod
 from radar.builds.run import BuildRecord
 from radar.pipeline import RunLock, latest_run
 from radar.ui import jobs, schedule
@@ -34,8 +32,8 @@ def daily_setup(cfg, monkeypatch, build_fn, *, mode="with_digest", audio_fn=None
     cfg.email.enabled = True
     cfg.notebooklm.enabled = audio_fn is not None
     calls = []
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", build_fn)
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg, **k: [])
     monkeypatch.setattr(cli, "stage_scan", lambda cfg, *a, **k: calls.append("scan") or {})
     monkeypatch.setattr(cli, "stage_email", lambda cfg, *a, **k: calls.append("email") or {})
 
@@ -65,7 +63,7 @@ def test_daily_runs_build_in_parallel_with_audio(cfg, monkeypatch):
     audio_saw_build = []
 
     def build(cfg_, folder, result, **kw):
-        assert result == RESULT and kw["api_key"] == KEY
+        assert result == RESULT and "api_key" not in kw
         build_started.set()
         return BuildRecord(day="2026-11-19", status="published", package="p", url="u")
 
@@ -117,32 +115,81 @@ def test_slow_build_inside_budget_keeps_its_status(cfg, monkeypatch):
         return BuildRecord(day="d", status="published", package="p")
 
     daily_setup(cfg, monkeypatch, build)
-    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.timeout_min - 15 + 0.01)  # 0.6 s
+    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.poll_min + 0.01)  # 0.6 s
     cli.cmd_daily(cfg, SimpleNamespace())
     stage = latest_run(cfg)["stages"][2]
     assert stage["ok"] and stage["detail"]["status"] == "published"
 
 
-def test_build_that_never_finishes_is_removed_and_recorded(cfg, monkeypatch):
+def test_build_that_never_finishes_without_a_run_is_failed(cfg, monkeypatch):
     release = threading.Event()
-    removed = []
 
     def build(cfg_, folder, result, **kw):
-        kw["containers"].extend(["radar-build-x", "radar-build-x-verify"])
         release.wait(10)
         return BuildRecord(day="d", status="published")
 
     daily_setup(cfg, monkeypatch, build)
-    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.timeout_min - 15 + 0.001)
-    monkeypatch.setattr(cli, "BUILD_KILL_GRACE_MIN", 0.002)
-    monkeypatch.setattr(sandbox_mod, "remove", removed.append)
+    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.poll_min + 0.001)
     try:
         cli.cmd_daily(cfg, SimpleNamespace())
     finally:
         release.set()
     stage = latest_run(cfg)["stages"][2]
     assert not stage["ok"] and "build did not finish" in stage["error"]
-    assert removed == ["radar-build-x", "radar-build-x-verify"]
+
+
+def test_build_that_never_finishes_with_a_run_is_building(cfg, monkeypatch):
+    release = threading.Event()
+
+    def build(cfg_, folder, result, **kw):
+        run_mod._write_record(
+            BuildRecord(cli.dt.date.today().isoformat(), "building", "p", "f", run_id=5),
+            folder,
+            cfg_.builds_dir / "records",
+        )
+        release.wait(10)
+        return BuildRecord(day="d", status="published")
+
+    daily_setup(cfg, monkeypatch, build)
+    monkeypatch.setattr(cli, "BUILD_SETUP_MIN", -cfg.builds.poll_min + 0.001)
+    try:
+        cli.cmd_daily(cfg, SimpleNamespace())
+    finally:
+        release.set()
+    stage = latest_run(cfg)["stages"][2]
+    assert (
+        stage["ok"] and stage["detail"]["status"] == "building" and stage["detail"]["run_id"] == 5
+    )
+
+
+def test_building_record_keeps_daily_ok(cfg, monkeypatch):
+    daily_setup(cfg, monkeypatch, lambda *a, **k: BuildRecord(day="d", status="building", run_id=9))
+    assert cli.cmd_daily(cfg, SimpleNamespace()) == 0
+    stage = latest_run(cfg)["stages"][2]
+    assert stage["ok"] and not stage["skipped"] and stage["detail"]["status"] == "building"
+
+
+def test_daily_syncs_before_the_new_build(cfg, monkeypatch):
+    order = []
+
+    def build(*a, **kw):
+        order.append("build")
+        return BuildRecord(day="d", status="published", package="p")
+
+    daily_setup(cfg, monkeypatch, build)
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: order.append("sync") or [])
+    assert cli.cmd_daily(cfg, SimpleNamespace()) == 0
+    assert order == ["sync", "build"]
+
+
+def test_sync_crash_does_not_stop_the_build(cfg, monkeypatch):
+    def broken(cfg_, **k):
+        raise RuntimeError("gh exploded")
+
+    daily_setup(cfg, monkeypatch, lambda *a, **k: BuildRecord(day="d", status="published"))
+    monkeypatch.setattr(run_mod, "sync_builds", broken)
+    assert cli.cmd_daily(cfg, SimpleNamespace()) == 0
+    assert latest_run(cfg)["stages"][2]["detail"]["status"] == "published"
 
 
 def test_separate_mode_skips_build_in_daily(cfg, monkeypatch):
@@ -171,13 +218,13 @@ def test_daily_without_new_digest_skips_build_stage(cfg, monkeypatch):
     assert stage["name"] == "build" and stage["skipped"]
 
 
-def build_args(folder=None, retry=False, prepare=False):
-    return SimpleNamespace(folder=folder, retry=retry, prepare=prepare)
+def build_args(folder=None, retry=False, sync=False, init_repo=False):
+    return SimpleNamespace(folder=folder, retry=retry, sync=sync, init_repo=init_repo)
 
 
 def fake_build(record, seen):
     def build(cfg, folder, result, **kw):
-        seen["folder"], seen["result"], seen["key"] = folder, result, kw["api_key"]
+        seen["folder"], seen["result"], seen["kw"] = folder, result, kw
         seen["locked"] = RunLock(cfg).holder()
         return record
 
@@ -189,10 +236,9 @@ def test_build_command_uses_latest_digest(cfg, monkeypatch, capsys):
     latest = make_digest(cfg, "2026-11-19")
     seen = {}
     rec = BuildRecord(day="d", status="published", package="pkg", url="https://x/y")
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", fake_build(rec, seen))
     assert cli.cmd_build(cfg, build_args()) == 0
-    assert seen["folder"] == latest and seen["result"] == RESULT and seen["key"] == KEY
+    assert seen["folder"] == latest and seen["result"] == RESULT and seen["kw"] == {}
     assert seen["locked"]["owner"] == "build"
     assert RunLock(cfg).holder() is None
     out = capsys.readouterr().out
@@ -206,7 +252,6 @@ def test_build_command_uses_latest_digest(cfg, monkeypatch, capsys):
 def test_build_exit_codes(cfg, monkeypatch, capsys, status, code):
     make_digest(cfg)
     rec = BuildRecord(day="d", status=status, package="pkg", reason="why")
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", fake_build(rec, {}))
     assert cli.cmd_build(cfg, build_args()) == code
     out = capsys.readouterr().out
@@ -214,7 +259,6 @@ def test_build_exit_codes(cfg, monkeypatch, capsys, status, code):
 
 
 def test_build_named_folder_and_missing_digest(cfg, monkeypatch):
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", fake_build(BuildRecord("d", "skipped"), {}))
     with pytest.raises(cli.UserError):
         cli.cmd_build(cfg, build_args())
@@ -227,7 +271,6 @@ def test_build_needs_retry_when_day_already_has_a_record(cfg, monkeypatch, capsy
     folder = make_digest(cfg)
     (folder / "build.json").write_text(json.dumps({"status": "failed"}), encoding="utf-8")
     seen = {}
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", fake_build(BuildRecord("d", "published"), seen))
     assert cli.cmd_build(cfg, build_args()) == 0
     assert "folder" not in seen and "--retry" in capsys.readouterr().out
@@ -235,22 +278,73 @@ def test_build_needs_retry_when_day_already_has_a_record(cfg, monkeypatch, capsy
     assert seen["folder"] == folder
 
 
-def test_build_prepare_builds_network_and_image(cfg, monkeypatch):
-    calls = []
-    monkeypatch.setattr(sandbox_mod, "docker_ready", lambda: (True, ""))
-    monkeypatch.setattr(sandbox_mod, "ensure_network_and_proxy", lambda c: calls.append("net"))
-    monkeypatch.setattr(sandbox_mod, "ensure_image", lambda c: calls.append("image"))
-    assert cli.cmd_build(cfg, build_args(prepare=True)) == 0
-    assert calls == ["net", "image"]
-    monkeypatch.setattr(sandbox_mod, "docker_ready", lambda: (False, "Docker is not running"))
-    with pytest.raises(cli.UserError, match="Docker is not running"):
-        cli.cmd_build(cfg, build_args(prepare=True))
+def test_build_sync_finishes_records_and_holds_the_lock(cfg, monkeypatch, capsys):
+    seen = {}
+
+    def fake_sync(cfg_, **kw):
+        seen["locked"] = RunLock(cfg_).holder()
+        return [BuildRecord(day="d", status="published", package="pkg", url="https://x/y")]
+
+    monkeypatch.setattr(run_mod, "sync_builds", fake_sync)
+    assert cli.cmd_build(cfg, build_args(sync=True)) == 0
+    assert seen["locked"]["owner"] == "build" and RunLock(cfg).holder() is None
+    assert "published" in capsys.readouterr().out
 
 
-def test_builds_key_stores_stripped_key(cfg, monkeypatch):
+def test_build_sync_exit_codes(cfg, monkeypatch, capsys):
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: [])
+    assert cli.cmd_build(cfg, build_args(sync=True)) == 0
+    assert "nothing to sync" in capsys.readouterr().out
+    bad = [BuildRecord(day="d", status="failed", package="p", reason="build job failed")]
+    monkeypatch.setattr(run_mod, "sync_builds", lambda cfg_, **k: bad)
+    assert cli.cmd_build(cfg, build_args(sync=True)) == 1
+    assert "build job failed" in capsys.readouterr().out
+
+
+def test_build_init_repo(cfg, monkeypatch, capsys):
+    from radar.builds import repo_init
+
+    seen = {}
+
+    def fake_init(cfg_, **kw):
+        seen["locked"] = RunLock(cfg_).holder()
+        return "https://github.com/o/r"
+
+    monkeypatch.setattr(repo_init, "init_repo", fake_init)
+    assert cli.cmd_build(cfg, build_args(init_repo=True)) == 0
+    assert seen["locked"]["owner"] == "build" and RunLock(cfg).holder() is None
+    assert "https://github.com/o/r" in capsys.readouterr().out
+
+
+def test_build_init_repo_error_exits_2(cfg, monkeypatch, capsys):
+    from radar.builds import repo_init
+    from radar.builds.actions import ActionsError
+
+    def refuse(cfg_, **kw):
+        raise ActionsError("gh needs the workflow scope: run gh auth refresh -s workflow")
+
+    monkeypatch.setattr(repo_init, "init_repo", refuse)
+    monkeypatch.setattr(cli, "load_config", lambda path=None, **k: cfg)
+    code = cli.main(["build", "--init-repo"])
+    assert code == 2
+    assert "workflow scope" in capsys.readouterr().err
+    assert RunLock(cfg).holder() is None
+
+
+def test_parser_has_sync_and_init_repo_but_not_prepare():
+    args = cli.build_parser().parse_args(["build", "--sync"])
+    assert args.sync and not args.init_repo
+    assert cli.build_parser().parse_args(["build", "--init-repo"]).init_repo
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["build", "--prepare"])
+
+
+def test_builds_key_goes_to_the_repo_secret(cfg, monkeypatch):
+    from radar.builds import repo_init
+
     stored = []
-    monkeypatch.setattr(keys, "set_key", stored.append)
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": f"  {KEY}\n ")
+    monkeypatch.setattr(repo_init, "set_secret", lambda cfg_, key: stored.append(key))
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": f"  {KEY}" + chr(10) + " ")
     assert cli.cmd_builds_key(cfg, SimpleNamespace()) == 0
     assert stored == [KEY]
     monkeypatch.setattr("getpass.getpass", lambda prompt="": "   ")
@@ -259,16 +353,18 @@ def test_builds_key_stores_stripped_key(cfg, monkeypatch):
     assert stored == [KEY]
 
 
-def test_keys_use_the_credential_store(monkeypatch):
-    import keyring
+def test_builds_key_error_is_a_user_error_without_the_key(cfg, monkeypatch):
+    from radar.builds import repo_init
+    from radar.builds.actions import ActionsError
 
-    store = {}
-    monkeypatch.setattr(keyring, "set_password", lambda s, u, p: store.update({(s, u): p}))
-    monkeypatch.setattr(keyring, "get_password", lambda s, u: store.get((s, u)))
-    assert keys.get_key() is None
-    keys.set_key(KEY)
-    assert store == {("research-radar-anthropic", "default"): KEY}
-    assert keys.get_key() == KEY
+    def refuse(cfg_, key):
+        raise ActionsError("could not store the secret")
+
+    monkeypatch.setattr(repo_init, "set_secret", refuse)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": KEY)
+    with pytest.raises(cli.UserError, match="could not store the secret") as err:
+        cli.cmd_builds_key(cfg, SimpleNamespace())
+    assert KEY not in str(err.value)
 
 
 def test_status_shows_skipped_and_optional_failures(cfg, capsys):
@@ -295,7 +391,9 @@ def test_status_shows_skipped_and_optional_failures(cfg, capsys):
 def test_job_actions():
     assert jobs.ACTIONS["build"] == ["build"]
     assert jobs.ACTIONS["build-retry"] == ["build", "--retry"]
-    assert jobs.ACTIONS["build-image"] == ["build", "--prepare"]
+    assert jobs.ACTIONS["build-sync"] == ["build", "--sync"]
+    assert jobs.ACTIONS["build-init-repo"] == ["build", "--init-repo"]
+    assert "build-image" not in jobs.ACTIONS
 
 
 def test_separate_time_format(tmp_path):
@@ -373,7 +471,6 @@ def daily_lock(cfg):
 def separate_cfg(cfg, monkeypatch, seen):
     cfg.builds.mode = "separate"
     rec = BuildRecord(day=TODAY, status="published", package="pkg", url="https://x/y")
-    monkeypatch.setattr(keys, "get_key", lambda: KEY)
     monkeypatch.setattr(run_mod, "run_build", fake_build(rec, seen))
 
 
@@ -442,19 +539,3 @@ def test_separate_mode_does_not_wait_for_other_jobs(cfg, monkeypatch, daily_lock
     with pytest.raises(LockHeld):
         cli.cmd_build(cfg, build_args())
     assert clock.sleeps == []
-
-
-def test_key_store_error_is_a_skip(cfg, monkeypatch, capsys):
-    folder = make_digest(cfg)
-    seen = {}
-
-    def broken():
-        raise RuntimeError("keyring backend exploded")
-
-    monkeypatch.setattr(keys, "get_key", broken)
-    monkeypatch.setattr(run_mod, "run_build", fake_build(BuildRecord("d", "published"), seen))
-    assert cli.cmd_build(cfg, build_args()) == 0
-    out = capsys.readouterr().out
-    assert "API key unavailable" in out and "exploded" not in out and "folder" not in seen
-    data = json.loads((folder / "build.json").read_text("utf-8"))
-    assert (data["status"], data["reason"]) == ("skipped", "API key unavailable")

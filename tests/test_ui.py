@@ -320,17 +320,30 @@ def test_build_file_rejects_traversal_and_non_images(client):
     assert client.get("/api/builds/2026-11-19/file/missing.png").status_code == 404
 
 
-def test_builds_key_stored_and_never_echoed(client, monkeypatch):
-    import keyring
+def test_builds_key_goes_to_the_repo_secret_and_is_never_echoed(client, monkeypatch):
+    from radar.builds import repo_init
 
-    saved = {}
-    monkeypatch.setattr(keyring, "set_password", lambda s, u, k: saved.update(s=s, u=u, k=k))
+    saved = []
+    monkeypatch.setattr(repo_init, "set_secret", lambda cfg, key: saved.append(key))
     key = "sk-ant-" + "a" * 30
-    r = client.post("/api/builds/key", json={"key": f" {key}\n"}, headers=H)
+    r = client.post("/api/builds/key", json={"key": f" {key}" + chr(10)}, headers=H)
     assert r.status_code == 200 and r.json() == {"saved": True} and key not in r.text
-    assert saved == {"s": "research-radar-anthropic", "u": "default", "k": key}
+    assert saved == [key]
     assert client.post("/api/builds/key", json={"key": "tooshort"}, headers=H).status_code == 400
-    assert saved["k"] == key  # the rejected key was not stored
+    assert len(saved) == 1  # the rejected key was not stored
+
+
+def test_builds_key_failure_is_a_fixed_phrase(client, monkeypatch):
+    from radar.builds import repo_init
+    from radar.builds.actions import ActionsError
+
+    def boom(cfg, key):
+        raise ActionsError("could not store the secret")
+
+    monkeypatch.setattr(repo_init, "set_secret", boom)
+    key = "sk-ant-" + "a" * 30
+    r = client.post("/api/builds/key", json={"key": key}, headers=H)
+    assert r.status_code == 400 and "could not store the secret" in r.text and key not in r.text
 
 
 def test_builds_posts_need_token(client):
@@ -415,22 +428,16 @@ def test_build_markdown_drops_remote_images(client):
     assert "evil.example" not in d["log_html"] and "chart" in d["readme_html"]
 
 
-@pytest.mark.parametrize(
-    ("action", "cleans"),
-    [("build", True), ("build-retry", True), ("daily", True), ("scan", False)],
-)
-def test_cancel_removes_build_containers(tmp_path, monkeypatch, action, cleans):
+def test_cancel_kills_the_job_without_docker(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from radar.builds import sandbox
     from radar.ui import jobs
     from radar.ui.jobs import Job
 
-    killed, removed = [], []
+    killed = []
     monkeypatch.setattr(jobs.subprocess, "run", lambda argv, **kw: killed.append(argv))
-    monkeypatch.setattr(sandbox, "remove_build_containers", lambda: removed.append(True))
     r = JobRunner(tmp_path, tmp_path / "data", python="py")
-    r.current = Job(action, ["radar", action])
+    r.current = Job("build", ["radar", "build"])
     r.current.proc = SimpleNamespace(pid=4242, terminate=lambda: killed.append("term"))
     assert r.cancel() is True
-    assert killed and removed == ([True] if cleans else [])
+    assert killed

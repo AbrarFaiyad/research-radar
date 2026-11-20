@@ -37,7 +37,7 @@ _PROFILE_MAX = 50_000
 _BUILD_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _FILE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _IMAGE_TYPES = {".png": "image/png", ".svg": "image/svg+xml"}
-_BUILD_ACTIONS = ("build", "build-retry", "build-image")
+_BUILD_ACTIONS = ("build", "build-retry", "build-sync", "build-init-repo")
 _KEY_MIN = 20
 
 
@@ -474,14 +474,18 @@ def create_app(
 
     @app.post("/api/builds/key")
     def builds_key(payload: dict = Body(...)) -> dict:
-        from ..builds.keys import set_key
+        from ..builds.actions import ActionsError
+        from ..builds.repo_init import set_secret
 
         key = "".join(str(payload.get("key", "")).split())
         if len(key) < _KEY_MIN:
             raise HTTPException(
                 400, f"that does not look like an API key (under {_KEY_MIN} characters)"
             )
-        set_key(key)
+        try:
+            set_secret(fresh(), key)
+        except ActionsError as e:
+            raise HTTPException(400, str(e)) from None
         return {"saved": True}
 
     @app.get("/api/builds/{day}")

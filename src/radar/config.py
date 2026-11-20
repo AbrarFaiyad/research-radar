@@ -86,39 +86,12 @@ class BuildsCfg:
     git_name: str = ""
     git_email: str = ""
     work_dir: str = ""  # empty = default_builds_dir(); relative paths are under the repo root
-    image: str = "research-radar-build:1"
-    cpus: int = 4
-    memory_gb: int = 8
-    timeout_min: int = 45
-    max_file_mb: float = 5
-    max_folder_mb: float = 20
-    allow_hosts: list[str] = field(
-        default_factory=lambda: [
-            "pypi.org",
-            "files.pythonhosted.org",
-            "github.com",
-            "codeload.github.com",
-            "objects.githubusercontent.com",
-            "raw.githubusercontent.com",
-            "huggingface.co",
-            "cdn-lfs.huggingface.co",
-            "readthedocs.io",
-            "readthedocs.org",
-            "github.io",
-            "api.anthropic.com",
-            "registry.npmjs.org",
-            "cas-bridge.xethub.hf.co",
-            "release-assets.githubusercontent.com",
-        ]
-    )
-    claude_model: str = "sonnet"
-    max_turns: int = 60
+    poll_min: int = 90  # how long the daily run waits for the workflow before leaving it
 
 
 def default_builds_dir(windows: bool | None = None, env: Mapping[str, str] | None = None) -> Path:
     """Build data lives in the user's local app data, outside the repo and any synced folder
-    (Docker Desktop bind mounts of Box Drive folders are unreliable, and sync would upload
-    unscanned work folders and logs)."""
+    (sync would upload records and logs)."""
     windows = os.name == "nt" if windows is None else windows
     env = os.environ if env is None else env
     if windows:

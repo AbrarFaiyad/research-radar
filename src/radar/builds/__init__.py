@@ -1,1 +1,1 @@
-"""Daily build: pick an item, run it in a sandbox, publish the result."""
+"""Daily build: pick an item, run it on GitHub Actions, publish the result."""
