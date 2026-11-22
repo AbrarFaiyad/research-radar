@@ -130,3 +130,46 @@ def test_page_groups_advanced_and_renders_textarea():
     )
     for needle in ("<details", "Advanced", "<textarea", '"lines"', "f.advanced"):
         assert needle in html
+
+
+def test_load_falls_back_to_defaults_for_absent_keys(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.toml").write_text("[scan]\nmax_posts = 7\n", encoding="utf-8")
+    vals = settings.load(tmp_path)
+    d = config.BrowserCfg()
+    assert vals["scan.max_posts"] == 7
+    assert vals["browser.mcp_args"] == d.mcp_args and vals["browser.mcp_command"] == "npx"
+    assert vals["email.smtp_port"] == 587 and vals["profile.private_markers"] == []
+    assert all(v is not None for v in vals.values())
+
+
+def test_saving_unrelated_key_does_not_blank_absent_ones(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.toml").write_text("[scan]\nmax_posts = 7\n", encoding="utf-8")
+    vals = settings.load(tmp_path)
+    settings.save(tmp_path, vals)  # what the page posts back
+    cfg = config.load_config(root=tmp_path)
+    assert cfg.browser.mcp_args == config.BrowserCfg().mcp_args
+    assert cfg.email.smtp_port == 587
+
+
+@pytest.mark.parametrize("bad", ["", "  \n \n", []])
+def test_empty_mcp_args_is_refused(env, bad):
+    client, root = env
+    client.get("/api/settings")
+    before = (root / "config" / "config.toml").read_text(encoding="utf-8")
+    r = client.post("/api/settings", json={"browser.mcp_args": bad}, headers=H)
+    assert r.status_code == 400 and "browser.mcp_args" in r.json()["errors"]
+    assert (root / "config" / "config.toml").read_text(encoding="utf-8") == before
+
+
+def test_private_markers_setting_round_trip_and_help(env):
+    client, root = env
+    f = settings.BY_ID["profile.private_markers"]
+    assert f.kind == "lines" and not f.advanced
+    assert f.help == "Names, handles or words that must never be published"
+    r = client.post(
+        "/api/settings", json={"profile.private_markers": "Jane Q Fake\n\n@janeq\n"}, headers=H
+    )
+    assert r.status_code == 200
+    assert config.load_config(root=root).profile.private_markers == ["Jane Q Fake", "@janeq"]

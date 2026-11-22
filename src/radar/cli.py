@@ -156,7 +156,14 @@ class DailyBuild:
         return asdict(record)
 
 
-def stage_digest(cfg: Config, no_audio: bool = False, after_codex: Callable | None = None) -> dict:
+def stage_digest(
+    cfg: Config,
+    no_audio: bool = False,
+    after_codex: Callable | None = None,
+    out: dict | None = None,
+) -> dict:
+    """Run the digest. `out` receives the folder name as soon as the digest exists, so a caller
+    still has it when the podcast part raises."""
     from .digest import run_digest
 
     store = Store(cfg.db_path)
@@ -169,6 +176,8 @@ def stage_digest(cfg: Config, no_audio: bool = False, after_codex: Callable | No
     if not res:
         return {"kept": 0, "reviewed": 0}
     print(f"digest: kept {res.kept} of {res.reviewed} -> {res.summary_md}")
+    if out is not None:
+        out["folder"] = res.folder.name
     if res.audio:
         print(f"audio: {res.audio}")
     elif cfg.notebooklm.enabled and not no_audio and res.kept:
@@ -205,7 +214,9 @@ def stage_podcast(cfg: Config, folder_name: str | None = None) -> dict:
     return {"folder": folder.name, "audio": out.name}
 
 
-def stage_podcast_publish(cfg: Config, folder_name: str | None = None) -> dict:
+def stage_podcast_publish(
+    cfg: Config, folder_name: str | None = None, replace: bool = False
+) -> dict:
     """Publish the digest's episode as a GitHub release. A skip raises StageSkipped, a failure
     RuntimeError; both carry fixed phrases."""
     from . import podcasts
@@ -214,7 +225,8 @@ def stage_podcast_publish(cfg: Config, folder_name: str | None = None) -> dict:
     if folder is None or not (folder / "codex_result.json").exists():
         raise StageSkipped("no new digest to publish")
     result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
-    rec = podcasts.publish(cfg, folder, result)
+    extra = {"replace": True} if replace else {}
+    rec = podcasts.publish(cfg, folder, result, **extra)
     if rec["status"] == "skipped":
         raise StageSkipped(rec.get("reason", "skipped"))
     if rec["status"] == "failed":
@@ -297,7 +309,7 @@ def cmd_podcast(cfg, args) -> int:
     if args.publish:
         with RunLock(cfg, owner="podcast"):
             try:
-                stage_podcast_publish(cfg, args.folder)
+                stage_podcast_publish(cfg, args.folder, replace=args.replace)
             except StageSkipped as e:
                 print(f"podcast: skipped: {e}")
             except RuntimeError as e:
@@ -506,7 +518,7 @@ def cmd_daily(cfg, args) -> int:
     made: dict = {}
 
     def digest_stage() -> dict:
-        made.update(stage_digest(cfg, after_codex=build.start if build else None))
+        made.update(stage_digest(cfg, after_codex=build.start if build else None, out=made))
         return made
 
     stages = {"scan": lambda: stage_scan(cfg), "digest": digest_stage}
@@ -680,6 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pc.add_argument(
         "--publish", action="store_true", help="publish the episode as a GitHub release"
+    )
+    pc.add_argument(
+        "--replace",
+        action="store_true",
+        help="with --publish: upload the episode again over the release's same-name asset",
     )
     pc.add_argument(
         "--init-repo", action="store_true", help="create the public podcasts repo if missing"

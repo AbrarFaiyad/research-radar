@@ -86,6 +86,7 @@ def personal_markers(cfg: Config) -> list[str]:
         raw.append(getpass.getuser())
     raw.append(platform.node())
     raw.extend(os.environ.get("RADAR_PRIVATE_MARKERS", "").split(","))
+    raw.extend(str(m) for m in getattr(cfg.profile, "private_markers", None) or [])
     out: list[str] = []
     for m in raw:
         m = (m or "").strip()

@@ -15,6 +15,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 from radar.builds import actions, scan
 from radar.builds.actions import ActionsError
@@ -27,6 +28,9 @@ REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 UPLOAD_TIMEOUT_S = 900
 FAILED = "could not publish the release"
 PERSONAL = "release text contains personal information"
+OFF = "podcast publishing is off"
+NO_REPO = "no repo set"
+BAD_PATH = "episode path not supported"
 README_TEXT = (
     "Daily Research Radar podcast episodes, one release per day. "
     "AI-generated (NotebookLM) discussions of public research news.\n"
@@ -34,6 +38,8 @@ README_TEXT = (
 DESCRIPTION = "Daily Research Radar podcast episodes (AI-generated, NotebookLM)"
 BLOCKING = ("personal information", "local path", "secret pattern")
 AUDIO_ORDER = (".mp3", ".m4a", ".wav")
+TRACKING_HOSTS = ("linkedin.com", "lnkd.in")  # their query strings carry member and session ids
+TRACKING_PARAMS = ("trk", "lipi", "rcm")  # plus every utm_* parameter
 
 
 def _episode(folder: Path) -> Path | None:
@@ -42,6 +48,28 @@ def _episode(folder: Path) -> Path | None:
         key=lambda p: AUDIO_ORDER.index(p.suffix.lower()),
     )
     return found[0] if found else None
+
+
+def _clean_link(link: str) -> str:
+    """The link without tracking: no query string at all on LinkedIn links, no utm_*, trk, lipi or
+    rcm parameters elsewhere."""
+    try:
+        parts = urlsplit(link)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    if any(host == h or host.endswith("." + h) for h in TRACKING_HOSTS):
+        return urlunsplit(parts._replace(query="", fragment=""))
+    keep = [
+        q
+        for q in parts.query.split("&")
+        if q
+        and q.split("=", 1)[0].lower() not in TRACKING_PARAMS
+        and not q.lower().startswith("utm_")
+    ]
+    if len(keep) == len([q for q in parts.query.split("&") if q]):
+        return link  # nothing to strip: keep the link as written
+    return urlunsplit(parts._replace(query="&".join(keep)))
 
 
 def _notes(result: dict) -> str:
@@ -53,6 +81,7 @@ def _notes(result: dict) -> str:
         link = str(item.get("primary_url") or "").strip()
         if not link.lower().startswith(("http://", "https://")):
             link = ""
+        link = _clean_link(link) if link else ""
         if title:
             lines.append(f"- {title}: {link}" if link else f"- {title}")
     return "\n".join(lines) + "\n"
@@ -96,17 +125,31 @@ def _run(gh: actions.GhFn, args: list[str], **kw) -> subprocess.CompletedProcess
     return proc
 
 
-def publish(cfg: Config, folder: Path, result: dict, gh: actions.GhFn = actions.gh) -> dict:
-    """Publish the folder's episode as a release; returns (and writes) podcast.json."""
+def publish(
+    cfg: Config,
+    folder: Path,
+    result: dict,
+    gh: actions.GhFn | None = None,
+    replace: bool = False,
+) -> dict:
+    """Publish the folder's episode as a release; returns (and writes) podcast.json.
+
+    replace=True uploads the episode again over a same-name asset of an existing release.
+    """
+    gh = gh or actions.gh
     repo = cfg.podcasts.repo.strip()
     tag = folder.name
-    if not repo:
-        return _skip(folder, tag, "no repo set")
+    if not cfg.podcasts.enabled:
+        return _skip(folder, tag, OFF)
+    if not repo or not REPO_RE.match(repo):
+        return _skip(folder, tag, NO_REPO)
     if not TAG_RE.match(tag):
         return _skip(folder, tag, "digest folder name is not a date")
     episode = _episode(folder)
     if episode is None:
         return _skip(folder, tag, "no episode")
+    if "#" in str(episode):  # gh reads path#label as a display label
+        return _skip(folder, tag, BAD_PATH)
     try:
         from radar.podcast import email_ready
 
@@ -119,7 +162,7 @@ def publish(cfg: Config, folder: Path, result: dict, gh: actions.GhFn = actions.
     if _has_personal_info(cfg, title, notes):
         return _skip(folder, tag, PERSONAL)
 
-    ok = _publish_release(gh, repo, tag, episode, title, notes)
+    ok = _publish_release(gh, repo, tag, episode, title, notes, replace)
     if not ok:
         return _write(folder, {"tag": tag, "status": "failed", "reason": FAILED})
     return _write(
@@ -134,21 +177,37 @@ def publish(cfg: Config, folder: Path, result: dict, gh: actions.GhFn = actions.
 
 
 def _publish_release(
-    gh: actions.GhFn, repo: str, tag: str, episode: Path, title: str, notes: str
+    gh: actions.GhFn,
+    repo: str,
+    tag: str,
+    episode: Path,
+    title: str,
+    notes: str,
+    replace: bool = False,
 ) -> bool:
-    view = _run(gh, ["release", "view", tag, "-R", repo, "--json", "assets"])
+    view = _run(gh, ["release", "view", tag, "-R", repo, "--json", "assets,isDraft"])
     if view is not None and view.returncode == 0:
         try:
-            names = {a.get("name") for a in json.loads(view.stdout).get("assets") or []}
+            data = json.loads(view.stdout)
+            draft = bool(data.get("isDraft"))
+            present = any(
+                a.get("name") == episode.name and a.get("state") == "uploaded"
+                for a in data.get("assets") or []
+            )
         except (ValueError, AttributeError):
             return False
-        if episode.name in names:
+        if present and not draft and not replace:
             return True
+        # missing, partial, or being replaced: --clobber overwrites a same-name asset
         proc = _run(
             gh,
-            ["release", "upload", tag, str(episode), "-R", repo],
+            ["release", "upload", tag, str(episode), "-R", repo, "--clobber"],
             timeout=UPLOAD_TIMEOUT_S,
         )
+        if proc is None or proc.returncode != 0:
+            return False
+        if draft:
+            proc = _run(gh, ["release", "edit", tag, "-R", repo, "--draft=false"])
     else:
         proc = _run(
             gh,
@@ -170,13 +229,24 @@ def _publish_release(
     return proc is not None and proc.returncode == 0
 
 
-def init_repo(cfg: Config, gh: actions.GhFn = actions.gh) -> str:
+def _visibility(out: str) -> str:
+    try:
+        return str(json.loads(out).get("visibility", "")).upper()
+    except (ValueError, AttributeError):
+        return ""
+
+
+def init_repo(cfg: Config, gh: actions.GhFn | None = None) -> str:
     """Create the public repo with a short README when missing; returns its URL."""
+    gh = gh or actions.gh
     repo = cfg.podcasts.repo.strip()
     if not repo or not REPO_RE.match(repo):
         raise ActionsError("no target repo")
-    view = _run(gh, ["repo", "view", repo])
-    if view is None or view.returncode != 0:
+    view = _run(gh, ["repo", "view", repo, "--json", "visibility"])
+    if view is not None and view.returncode == 0:
+        if _visibility(view.stdout) != "PUBLIC":
+            raise ActionsError("the repo exists but is not public")
+    else:
         made = _run(gh, ["repo", "create", repo, "--public", "--description", DESCRIPTION])
         if made is None or made.returncode != 0:
             raise ActionsError("could not create the repo")

@@ -34,8 +34,20 @@ def done(code=0, out="", err=""):
 class FakeGh:
     """Stands in for gh: `release view` answers from `release`, everything else succeeds."""
 
-    def __init__(self, release=None, repo_exists=True, fail=(), readme_exists=False):
+    def __init__(
+        self,
+        release=None,
+        repo_exists=True,
+        fail=(),
+        readme_exists=False,
+        draft=False,
+        asset_state="uploaded",
+        visibility="PUBLIC",
+    ):
         self.release = release  # None = no such release; else list of asset names
+        self.draft = draft
+        self.asset_state = asset_state
+        self.visibility = visibility
         self.repo_exists = repo_exists
         self.readme_exists = readme_exists
         self.fail = fail
@@ -48,9 +60,12 @@ class FakeGh:
         if args[:2] == ["release", "view"]:
             if self.release is None:
                 return done(1, err="release not found")
-            return done(0, json.dumps({"assets": [{"name": n} for n in self.release]}))
+            assert "assets,isDraft" in args
+            assets = [{"name": n, "state": self.asset_state} for n in self.release]
+            return done(0, json.dumps({"assets": assets, "isDraft": self.draft}))
         if args[:2] == ["repo", "view"]:
-            return done(0 if self.repo_exists else 1)
+            out = json.dumps({"visibility": self.visibility})
+            return done(0, out) if self.repo_exists else done(1)
         if args[:2] == ["api", f"repos/{REPO}/contents/README.md"]:
             return done(0 if self.readme_exists else 1)
         return done(0)
@@ -118,7 +133,7 @@ def test_existing_release_without_asset_gets_upload(pcfg):
     gh = FakeGh(release=[])
     rec = podcasts.publish(pcfg, folder, RESULT, gh=gh)
     up = next(a for a, _ in gh.calls if a[:2] == ["release", "upload"])
-    assert up[2] == "2026-11-21" and str(folder / "episode.m4a") in up
+    assert up[2] == "2026-11-21" and str(folder / "episode.m4a") in up and "--clobber" in up
     assert ("release", "create") not in gh.verbs()
     assert rec["status"] == "published"
 
@@ -232,6 +247,117 @@ def test_mp3_preferred_like_the_email(pcfg):
     assert rec["url"].endswith("/episode.mp3")
 
 
+def calls_of(gh, verb):
+    return [a for a, _ in gh.calls if a[:2] == verb]
+
+
+def test_replace_uploads_over_an_existing_asset_with_clobber(pcfg):
+    folder = make_folder(pcfg)
+    gh = FakeGh(release=["episode.m4a"])
+    rec = podcasts.publish(pcfg, folder, RESULT, gh=gh, replace=True)
+    (up,) = calls_of(gh, ["release", "upload"])
+    assert up[2] == "2026-11-21" and "--clobber" in up and str(folder / "episode.m4a") in up
+    assert ("release", "create") not in gh.verbs() and rec["status"] == "published"
+
+
+def test_replace_false_leaves_a_good_asset_alone(pcfg):
+    gh = FakeGh(release=["episode.m4a"])
+    podcasts.publish(pcfg, make_folder(pcfg), RESULT, gh=gh, replace=False)
+    assert gh.verbs() == [("release", "view")]
+
+
+def test_partial_asset_is_uploaded_again_with_clobber(pcfg):
+    gh = FakeGh(release=["episode.m4a"], asset_state="starter")
+    rec = podcasts.publish(pcfg, make_folder(pcfg), RESULT, gh=gh)
+    (up,) = calls_of(gh, ["release", "upload"])
+    assert "--clobber" in up and rec["status"] == "published"
+    assert ("release", "edit") not in gh.verbs()
+
+
+def test_draft_release_is_uploaded_then_published(pcfg):
+    gh = FakeGh(release=["episode.m4a"], draft=True)
+    rec = podcasts.publish(pcfg, make_folder(pcfg), RESULT, gh=gh)
+    assert gh.verbs() == [("release", "view"), ("release", "upload"), ("release", "edit")]
+    edit = calls_of(gh, ["release", "edit"])[0]
+    assert edit[2] == "2026-11-21" and "--draft=false" in edit
+    assert rec["status"] == "published"
+
+
+def test_draft_edit_failure_is_failed(pcfg):
+    gh = FakeGh(release=[], draft=True, fail=[("release", "edit")])
+    rec = podcasts.publish(pcfg, make_folder(pcfg), RESULT, gh=gh)
+    assert rec["status"] == "failed" and rec["reason"] == podcasts.FAILED
+
+
+def test_publishing_off_skips_without_gh(pcfg):
+    pcfg.podcasts.enabled = False
+    folder = make_folder(pcfg)
+    gh = FakeGh()
+    rec = podcasts.publish(pcfg, folder, RESULT, gh=gh)
+    assert rec["status"] == "skipped" and rec["reason"] == "podcast publishing is off"
+    assert gh.calls == [] and record(folder) == rec
+
+
+@pytest.mark.parametrize("repo", ["not a repo", "a/b/c", "x;rm/y", "../x", "a/b c"])
+def test_malformed_repo_is_skipped_without_gh(pcfg, repo):
+    pcfg.podcasts.repo = repo
+    gh = FakeGh()
+    rec = podcasts.publish(pcfg, make_folder(pcfg), RESULT, gh=gh)
+    assert rec["status"] == "skipped" and rec["reason"] == "no repo set" and gh.calls == []
+
+
+def test_episode_path_with_hash_is_refused(pcfg):
+    folder = make_folder(pcfg).parent / "a#b" / "2026-11-21"
+    folder.mkdir(parents=True)
+    (folder / "episode.m4a").write_bytes(b"x")
+    gh = FakeGh()
+    rec = podcasts.publish(pcfg, folder, RESULT, gh=gh)
+    assert rec["status"] == "skipped" and rec["reason"] == "episode path not supported"
+    assert gh.calls == []
+
+
+def test_publish_never_runs_the_real_gh(pcfg):
+    """With no gh injected, the suite-wide guard (conftest) makes the real wrapper raise."""
+    with pytest.raises(AssertionError, match="real gh"):
+        podcasts.publish(pcfg, make_folder(pcfg), RESULT)
+
+
+@pytest.mark.parametrize(
+    "link, want",
+    [
+        (
+            "https://www.linkedin.com/posts/x-123?utm_source=share&rcm=ACoAAbc",
+            "https://www.linkedin.com/posts/x-123",
+        ),
+        ("https://lnkd.in/abc?trk=1", "https://lnkd.in/abc"),
+        (
+            "https://de.linkedin.com/feed/update/urn:li:activity:1/?lipi=urn",
+            "https://de.linkedin.com/feed/update/urn:li:activity:1/",
+        ),
+        (
+            "https://arxiv.org/abs/2611.00001?utm_medium=x&version=2&TRK=3&lipi=q",
+            "https://arxiv.org/abs/2611.00001?version=2",
+        ),
+        ("https://example.org/p?a=1&b=2", "https://example.org/p?a=1&b=2"),
+    ],
+)
+def test_tracking_parameters_are_stripped_from_notes(pcfg, link, want):
+    folder = make_folder(pcfg)
+    gh = FakeGh()
+    result = {"headline": "H", "items": [{"title": "T", "primary_url": link}]}
+    podcasts.publish(pcfg, folder, result, gh=gh)
+    _, notes = next((a, i) for a, i in gh.calls if a[:2] == ["release", "create"])
+    assert notes == f"- T: {want}\n"
+
+
+def test_private_markers_setting_blocks_publishing(pcfg):
+    pcfg.profile.private_markers = ["Jane Q Fake"]
+    gh = FakeGh()
+    result = {"headline": "Talk by jane q fake", "items": []}
+    rec = podcasts.publish(pcfg, make_folder(pcfg), result, gh=gh)
+    assert rec["status"] == "skipped" and rec["reason"] == podcasts.PERSONAL and gh.calls == []
+
+
 # ---- repo setup ---------------------------------------------------------------------------------
 def test_init_repo_creates_public_repo_and_readme(pcfg):
     gh = FakeGh(repo_exists=False)
@@ -258,6 +384,18 @@ def test_init_repo_failure_is_a_fixed_phrase(pcfg):
     with pytest.raises(ActionsError) as e:
         podcasts.init_repo(pcfg, gh=gh)
     assert "SECRET" not in str(e.value) and "someone" not in str(e.value)
+
+
+def test_init_repo_private_repo_is_refused(pcfg):
+    gh = FakeGh(repo_exists=True, visibility="PRIVATE")
+    with pytest.raises(ActionsError, match="the repo exists but is not public"):
+        podcasts.init_repo(pcfg, gh=gh)
+    assert ("repo", "create") not in gh.verbs() and not [a for a, _ in gh.calls if "PUT" in a]
+
+
+def test_init_repo_never_runs_the_real_gh(pcfg):
+    with pytest.raises(AssertionError, match="real gh"):
+        podcasts.init_repo(pcfg)
 
 
 def test_init_repo_needs_repo(pcfg):
@@ -307,8 +445,10 @@ def test_job_actions():
 RES = {"headline": "H", "items": [{"title": "T", "primary_url": "https://example.org/x"}]}
 
 
-def daily_setup(cfg, monkeypatch, *, digest=True, gh=None, headline="H"):
-    cfg.notebooklm.enabled = False
+def daily_setup(
+    cfg, monkeypatch, *, digest=True, gh=None, headline="H", notebooklm=False, audio="episode.m4a"
+):
+    cfg.notebooklm.enabled = notebooklm
     cfg.email.enabled = False  # the real config may enable email; never send from a test
     monkeypatch.setattr(cli, "stage_email", lambda *a, **k: pytest.fail("email sent"))
     calls = []
@@ -317,7 +457,7 @@ def daily_setup(cfg, monkeypatch, *, digest=True, gh=None, headline="H"):
     def fake_run_digest(cfg_, store, make_audio=None, after_codex=None, **_):
         if not digest:
             return None
-        folder = make_folder(cfg_)
+        folder = make_folder(cfg_, audio=audio)
         res = {**RES, "headline": headline}
         (folder / "codex_result.json").write_text(json.dumps(res), encoding="utf-8")
         return SimpleNamespace(
@@ -349,6 +489,29 @@ def test_daily_publishes_after_digest(pcfg, monkeypatch):
     assert cli.cmd_daily(pcfg, SimpleNamespace()) == 0
     assert [s["name"] for s in latest_run(pcfg)["stages"]] == ["scan", "digest", "podcast-publish"]
     assert calls == [("2026-11-21", "H")]
+
+
+def test_daily_podcast_failure_still_reaches_publish_stage(pcfg, monkeypatch):
+    gh = FakeGh()
+    daily_setup(
+        pcfg, monkeypatch, gh=gh, notebooklm=True, audio=None
+    )  # digest has no audio: podcast failed
+    assert cli.cmd_daily(pcfg, SimpleNamespace()) == 1  # the digest stage failed, not publish
+    st = stages(pcfg)
+    assert not st["digest"]["ok"] and "podcast failed" in st["digest"]["error"]
+    pub = st["podcast-publish"]
+    assert pub["ok"] and pub["skipped"] and pub["error"] == "no episode"
+    folder = pcfg.digests_dir / "2026-11-21"
+    assert record(folder) == {"tag": "2026-11-21", "status": "skipped", "reason": "no episode"}
+    assert gh.calls == []
+
+
+def test_stage_digest_reports_the_folder_before_a_podcast_failure(pcfg, monkeypatch):
+    daily_setup(pcfg, monkeypatch, notebooklm=True, audio=None)
+    out = {}
+    with pytest.raises(RuntimeError, match="podcast failed"):
+        cli.stage_digest(pcfg, out=out)
+    assert out == {"folder": "2026-11-21"}
 
 
 def test_daily_without_podcasts_has_no_stage(cfg, monkeypatch):

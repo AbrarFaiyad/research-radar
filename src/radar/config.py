@@ -16,6 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class ProfileCfg:
     # Who the digest and podcast are for, in one phrase. The topics live in field_profile.md.
     reader: str = "a researcher who wants the most important new work in the field described below"
+    # Names, handles or words that must never be published (checked before anything is published).
+    private_markers: list[str] = field(default_factory=list)
 
 
 @dataclass

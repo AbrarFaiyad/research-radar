@@ -198,6 +198,14 @@ def test_personal_markers(cfg, monkeypatch):
     assert all(len(x) >= 3 for x in m)
 
 
+def test_personal_markers_include_profile_setting(cfg, monkeypatch):
+    monkeypatch.setenv("RADAR_PRIVATE_MARKERS", "555-0100")
+    cfg.profile.private_markers = ["Jane Q Fake", " @janeq ", "ab"]
+    m = scan.personal_markers(cfg)
+    assert "Jane Q Fake" in m and "@janeq" in m and "555-0100" in m
+    assert "ab" not in m  # shorter than the minimum marker length
+
+
 def test_utf16_after_padding(root):
     (root / "a.txt").write_bytes(("\u4e01" * 5000 + FAKE_KEY).encode("utf-16-le"))
     assert "binary" in _reasons(_scan(root))

@@ -26,7 +26,7 @@ class Field:
     pattern: str = ""  # str kinds: a non-empty value must match this regex
     message: str = ""  # shown when the pattern does not match (default: "has the wrong format")
     advanced: bool = False  # technical key: shown under the section's collapsed Advanced group
-    required: bool = False  # str kinds: an empty value is refused
+    required: bool = False  # str and lines kinds: an empty value is refused
 
     @property
     def id(self) -> str:
@@ -40,6 +40,13 @@ SCHEMA: tuple[Field, ...] = (
         "str",
         "Who the digest is for",
         help="One phrase; topics live in the field profile.",
+    ),
+    Field(
+        "profile",
+        "private_markers",
+        "lines",
+        "Private words (never published)",
+        help="Names, handles or words that must never be published",
     ),
     Field("scan", "max_posts", "int", "Posts per scan", 1, 300),
     Field("scan", "max_minutes", "float", "Max scan minutes", 1, 60),
@@ -78,6 +85,7 @@ SCHEMA: tuple[Field, ...] = (
         "lines",
         "Browser server arguments",
         help="One argument per line. The default pins the Playwright MCP version.",
+        required=True,
         advanced=True,
     ),
     Field(
@@ -228,8 +236,33 @@ def load(root: Path) -> dict[str, Any]:
     values = {}
     for f in SCHEMA:
         v = doc.get(f.section, {}).get(f.key)
+        if v is None:  # absent key: show (and save) the value the program uses
+            values[f.id] = _default(f)
+            continue
         values[f.id] = v.unwrap() if hasattr(v, "unwrap") else v
     return values
+
+
+def _default(f: Field) -> Any:
+    from dataclasses import fields as dc_fields
+
+    from . import config
+
+    cls = {
+        "profile": config.ProfileCfg,
+        "browser": config.BrowserCfg,
+        "scan": config.ScanCfg,
+        "llm": config.LlmCfg,
+        "digest": config.DigestCfg,
+        "notebooklm": config.NotebookLMCfg,
+        "email": config.EmailCfg,
+        "builds": config.BuildsCfg,
+        "podcasts": config.PodcastsCfg,
+    }[f.section]
+    for d in dc_fields(cls):
+        if d.name == f.key:
+            return d.default_factory() if callable(d.default_factory) else d.default
+    return None
 
 
 def coerce(f: Field, raw: Any) -> Any:
@@ -260,6 +293,8 @@ def coerce(f: Field, raw: Any) -> Any:
         out = [str(i).strip() for i in items if str(i).strip()]
         if len(out) > 50 or any(len(i) > 200 for i in out):
             raise ValueError("is too long")
+        if f.required and not out:
+            raise ValueError("is required")
         return out
     text = str(raw if raw is not None else "").strip()
     if f.required and not text:

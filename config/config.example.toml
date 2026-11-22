@@ -8,6 +8,9 @@ field_profile = "config/field_profile.md"
 # Who the digest and podcast are for. Change this and config/field_profile.md for your field.
 reader = "a computational materials science PhD student working on machine-learning interatomic potentials, DFT, and molecular dynamics"
 
+# Names, handles or words that must never be published; the publish scans check them.
+private_markers = []
+
 [browser]
 # Playwright MCP server, pinned. Uses its own persistent profile; log in once with `radar login`.
 mcp_command = "npx"
