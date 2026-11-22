@@ -130,7 +130,7 @@ def test_commit_is_the_owners_with_utc_dates(icfg, origin, monkeypatch):
 def test_existing_readme_is_kept(icfg, origin, tmp_path):
     other = tmp_path / "other"
     sh("clone", "--quiet", str(origin), str(other), cwd=tmp_path)
-    (other / "README.md").write_text("# my own index\n", encoding="utf-8")
+    (other / "README.md").write_bytes(b"# my own index\n")
     sh("add", "README.md", cwd=other)
     sh("-c", "user.name=o", "-c", "user.email=o@x.y", "commit", "-m", "init", cwd=other)
     sh("push", "origin", "HEAD:main", cwd=other)
@@ -150,8 +150,9 @@ def test_changed_files_are_updated_with_their_own_message(icfg, origin, tmp_path
     go(icfg)
     other = tmp_path / "other"
     sh("clone", "--quiet", str(origin), str(other), cwd=tmp_path)
-    (other / "tools" / "scan.py").write_text("# old version\n", encoding="utf-8")
-    (other / "README.md").write_text("# edited by the owner\n", encoding="utf-8")
+    # bytes, not text mode: on Windows write_text turns \n into \r\n
+    (other / "tools" / "scan.py").write_bytes(b"# old version\n")
+    (other / "README.md").write_bytes(b"# edited by the owner\n")
     sh("add", "-A", cwd=other)
     sh("-c", "user.name=o", "-c", "user.email=o@x.y", "commit", "-m", "old", cwd=other)
     sh("push", "origin", "HEAD:main", cwd=other)
