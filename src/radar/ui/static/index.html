@@ -358,7 +358,7 @@ const fmtTime = s => s ? new Date(s).toLocaleString([], {weekday: "short", hour:
 $$("#nav button").forEach(b => b.onclick = () => {
   $$("#nav button").forEach(x => x.classList.toggle("active", x === b));
   $$("section.tab").forEach(s => s.classList.toggle("active", s.id === b.dataset.tab));
-  ({setup: loadSetup, schedule: loadSchedule, settings: loadSettings, profile: loadProfile, queue: loadQueue, digests: loadDigests, builds: loadBuilds})[b.dataset.tab]?.();
+  ({setup: loadSetup, schedule: loadSchedule, settings: loadSettings, profile: loadProfile, queue: loadQueue, digests: () => { selectedDigest = null; return loadDigests(); }, builds: loadBuilds})[b.dataset.tab]?.();
 });
 const openTab = id => $(`#nav button[data-tab="${id}"]`).click();
 
@@ -553,13 +553,15 @@ async function loadQueue() {
 $("#q-all").onchange = () => { $("#q-csv").href = `/api/queue.csv?all=${$("#q-all").checked}`; loadQueue(); };
 
 // ---- digests
+let selectedDigest = null;  // the digest on screen; a reload (after a job) keeps it
 async function loadDigests() {
   const ds = await api("/api/digests");
   $("#d-list").innerHTML = ds.length ? ds.map(d => `<button class="btn" data-d="${esc(d.name)}"><b>${esc(d.name)}</b>
     <div class="muted" style="font-size:13px">${d.kept != null ? `${d.kept} kept of ${d.reviewed}` : ""}${d.audio ? " · podcast" : ""}</div>
     <div style="font-size:13px">${esc(d.headline)}</div></button>`).join("") : `<p class="muted">No digests yet.</p>`;
   $$("[data-d]").forEach(b => b.onclick = () => showDigest(b.dataset.d, ds.find(x => x.name === b.dataset.d), b));
-  if (ds.length) $$("[data-d]")[0].click();
+  const keep = $$("[data-d]").find(b => b.dataset.d === selectedDigest);
+  if (keep) keep.click(); else if (ds.length) $$("[data-d]")[0].click();
 }
 function podcastLine(p) {
   if (!p) return "";
@@ -568,16 +570,19 @@ function podcastLine(p) {
   return p.status === "published" ? "" : `<p class="muted">Podcast ${esc(p.status)}${p.reason ? `: ${esc(p.reason)}` : ""}</p>`;
 }
 async function showDigest(name, meta, btn) {
+  selectedDigest = name;
   $$("[data-d]").forEach(x => x.classList.toggle("active", x === btn));
   const d = await api(`/api/digests/${encodeURIComponent(name)}`);
   $("#d-view").innerHTML = `<div class="row" style="margin:14px 0 4px">
       <button class="btn" data-dact="podcast">${meta.audio ? "Regenerate podcast" : "Make podcast"}</button>
       <button class="btn" data-dact="email">Email this digest</button>
-      ${meta.audio && meta.podcast?.status !== "published" ? `<button class="btn" data-dact="podcast-publish">Publish podcast</button>` : ""}</div>
+      ${meta.audio && meta.podcasts_enabled ? (meta.podcast?.status === "published"
+        ? `<button class="btn" data-dact="podcast-publish" data-replace="1">Publish again</button>`
+        : `<button class="btn" data-dact="podcast-publish">Publish podcast</button>`) : ""}</div>
     ${podcastLine(meta.podcast)}
     ${meta.audio ? `<audio controls preload="none" src="/api/digests/${encodeURIComponent(name)}/audio"></audio>` : `<p class="muted">No podcast for this digest.</p>`}
     ${meta.notebook ? `<p><a href="${esc(meta.notebook)}" target="_blank" rel="noopener">Open in NotebookLM</a></p>` : ""}${d.html}`;
-  $$("[data-dact]").forEach(b => b.onclick = () => startJob({action: b.dataset.dact, folder: name}));
+  $$("[data-dact]").forEach(b => b.onclick = () => startJob({action: b.dataset.dact, folder: name, ...(b.dataset.replace ? {replace: true} : {})}));
 }
 
 $("#p-init").onclick = async () => { if (await startJob({action: "podcast-init-repo"})) loadChecks(); };

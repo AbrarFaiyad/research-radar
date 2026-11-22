@@ -133,6 +133,8 @@ def create_app(
             if not _DIGEST_NAME.match(str(payload["folder"])):
                 raise HTTPException(400, "bad digest name")
             extra = [str(payload["folder"])]
+        if action == "podcast-publish" and payload.get("replace") is True:
+            extra = [*extra, "--replace"]
         try:
             return runner.start(action, extra).summary()
         except JobBusy as e:
@@ -543,6 +545,7 @@ def create_app(
                     if url_file.exists()
                     else None,
                     "podcast": podcast_record(folder),
+                    "podcasts_enabled": bool(fresh().podcasts.enabled),
                 }
             )
         return out

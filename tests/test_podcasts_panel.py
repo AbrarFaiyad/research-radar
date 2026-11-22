@@ -135,3 +135,56 @@ def test_page_has_podcast_controls(client):  # noqa: F811
         "Set up podcasts repo",
     ):
         assert needle in html
+
+
+def test_podcast_publish_job_replace_adds_the_flag(client):  # noqa: F811
+    r = client.post(
+        "/api/jobs",
+        json={"action": "podcast-publish", "folder": "2026-11-19", "replace": True},
+        headers=H,
+    )
+    assert r.status_code == 200
+    assert client.runner.started[-1] == ("podcast-publish", ["2026-11-19", "--replace"])
+    client.runner.current.finished = 1.0
+    client.post("/api/jobs", json={"action": "podcast-publish", "replace": "yes"}, headers=H)
+    assert client.runner.started[-1] == ("podcast-publish", [])  # only a real true counts
+
+
+def test_digests_list_says_whether_publishing_is_on(client):  # noqa: F811
+    _digest_dir(client)
+    assert client.get("/api/digests").json()[0]["podcasts_enabled"] is False
+    r = client.post(
+        "/api/settings", json={"podcasts.enabled": True, "podcasts.repo": "o/r"}, headers=H
+    )
+    assert r.status_code == 200
+    assert client.get("/api/digests").json()[0]["podcasts_enabled"] is True
+
+
+def test_page_keeps_digest_and_offers_publish_again(client):  # noqa: F811
+    html = client.get("/").text
+    assert "selectedDigest" in html and "Publish again" in html
+    assert "podcasts_enabled" in html and "replace: true" in html
+
+
+def test_cli_replace_flag_reaches_publish(cfg, monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+
+    from radar import cli, podcasts
+
+    d = cfg.digests_dir / "2026-11-19"
+    d.mkdir(parents=True)
+    (d / "summary.md").write_text("# D\n", encoding="utf-8")
+    (d / "codex_result.json").write_text(_json.dumps({"headline": "H", "items": []}))
+    seen = []
+
+    def fake(c, f, r, **kw):
+        seen.append(kw)
+        return {"status": "published", "tag": f.name}
+
+    monkeypatch.setattr(podcasts, "publish", fake)
+    args = cli.build_parser().parse_args(["podcast", "--publish", "--replace", "2026-11-19"])
+    assert args.replace is True and cli.cmd_podcast(cfg, args) == 0
+    args = SimpleNamespace(init_repo=False, publish=True, folder="2026-11-19", replace=False)
+    assert cli.cmd_podcast(cfg, args) == 0
+    assert seen == [{"replace": True}, {}]
