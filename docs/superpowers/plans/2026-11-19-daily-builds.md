@@ -206,7 +206,7 @@ def test_build_argv_isolation(cfg, tmp_path):
     assert argv.count("-v") == 1 and f"{tmp_path}:/work" in " ".join(argv)
     assert "--network" in argv and argv[argv.index("--network") + 1] == NETWORK
     assert "--cap-drop" in argv and "--user" in argv and "1000:1000" in argv
-    assert not any(a.startswith("PATH=") or "faiya" in a.lower() for a in argv)
+    assert not any(a.startswith("PATH=") or getpass.getuser().lower() in a.lower() for a in argv)
 
 def test_env_file_holds_only_api_key(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("SECRET_HOST_VAR", "nope")  # host env must not pass through
