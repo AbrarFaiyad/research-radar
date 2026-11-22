@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from radar.builds import actions
 from radar.config import BuildsCfg, EmailCfg, NotebookLMCfg, PodcastsCfg, load_config
 from radar.db import Store
 
@@ -108,6 +109,25 @@ def _no_real_mail(monkeypatch):
 
     monkeypatch.setattr(smtplib, "SMTP", refuse)
     monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+
+REAL_GH = actions.gh
+
+
+@pytest.fixture
+def real_gh():
+    """The real gh wrapper, for a test that fakes subprocess.run underneath it."""
+    return REAL_GH
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh(monkeypatch):
+    """No test may run the real gh: tests inject a fake, or the call fails loudly."""
+
+    def refuse(*a, **k):
+        raise AssertionError("tests must not run the real gh")
+
+    monkeypatch.setattr(actions, "gh", refuse)
 
 
 @pytest.fixture

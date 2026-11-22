@@ -103,6 +103,11 @@ def gh(
     )
 
 
+def _real_gh() -> GhFn:
+    """The module's gh, looked up when called, so tests can replace it."""
+    return globals()["gh"]
+
+
 def _call(gh_fn: GhFn, args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
         proc = gh_fn(args)
@@ -129,7 +134,8 @@ def secret_names(repo: str, gh_fn: GhFn | None = None) -> set[str] | None:
     return {str(x.get("name")) for x in data if isinstance(x, dict)}
 
 
-def dispatch(cfg: Config, folder: str, prompt: str, gh: GhFn = gh) -> None:
+def dispatch(cfg: Config, folder: str, prompt: str, gh: GhFn | None = None) -> None:
+    gh = gh or _real_gh()
     fail = ActionsError("could not start the workflow")
     path: str | None = None
     try:
@@ -169,12 +175,13 @@ def find_run(
     cfg: Config,
     folder: str,
     since: dt.datetime,
-    gh: GhFn = gh,
+    gh: GhFn | None = None,
     attempts: int = 10,
     wait: float = 6,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """The oldest run of this folder at or after `since`, else the newest within the skew."""
+    gh = gh or _real_gh()
     oldest = since - dt.timedelta(seconds=CLOCK_SKEW_S)
     args = [
         "run",
@@ -229,10 +236,11 @@ def wait_run(
     cfg: Config,
     run_id: int,
     limit_s: float,
-    gh: GhFn = gh,
+    gh: GhFn | None = None,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> str:
+    gh = gh or _real_gh()
     args = ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion"]
     start = clock()
     reached = False
@@ -297,7 +305,7 @@ def outcome(
     cfg: Config,
     run_id: int,
     folder: str,
-    gh: GhFn = gh,
+    gh: GhFn | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[str, str]:
     """Map a finished run to (status, reason). Reasons are fixed phrases.
@@ -305,6 +313,7 @@ def outcome(
     ("building", UNREADABLE) means the run is done but its result cannot be read yet: keep the
     record and ask again later.
     """
+    gh = gh or _real_gh()
     data = _retry_json(
         gh,
         ["run", "view", str(run_id), "-R", cfg.builds.repo, "--json", "status,conclusion,jobs"],

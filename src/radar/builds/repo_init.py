@@ -159,10 +159,11 @@ def _verify_commit(g, cfg: Config, allowed: set[str]) -> None:
 def init_repo(
     cfg: Config,
     git: GitFn = run_git,
-    gh: actions.GhFn = actions.gh,
+    gh: actions.GhFn | None = None,
     remote_url: str | None = None,
 ) -> str:
     """Write or refresh the workflow files in the repo's main branch; returns the repo URL."""
+    gh = gh or actions.gh
     _check_identity(cfg)
     _check_scope(gh)
     b = cfg.builds
@@ -244,8 +245,9 @@ def init_repo(
     return repo_url
 
 
-def set_secret(cfg: Config, key: str, gh: actions.GhFn = actions.gh) -> None:
+def set_secret(cfg: Config, key: str, gh: actions.GhFn | None = None) -> None:
     """Store the Claude subscription token as the repo secret. It goes to gh on stdin only."""
+    gh = gh or actions.gh
     if not cfg.builds.repo.strip():
         raise ActionsError("no target repo")
     if len(key) < KEY_MIN or re.search(r"\s", key):

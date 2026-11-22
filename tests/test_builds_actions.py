@@ -337,7 +337,7 @@ def test_gh_env_passes_config_dir(monkeypatch, tmp_path):
     assert actions.gh_env()["GH_CONFIG_DIR"] == str(tmp_path)
 
 
-def test_gh_runs_subprocess_with_argv_and_env(monkeypatch):
+def test_gh_runs_subprocess_with_argv_and_env(monkeypatch, real_gh):
     got = {}
 
     def fake_run(argv, **kw):
@@ -347,7 +347,7 @@ def test_gh_runs_subprocess_with_argv_and_env(monkeypatch):
 
     monkeypatch.setattr(actions.subprocess, "run", fake_run)
     monkeypatch.setenv("GH_TOKEN", "tok")
-    out = actions.gh(["run", "list"], input="in", timeout=5)
+    out = real_gh(["run", "list"], input="in", timeout=5)
     assert out.stdout == "ok"
     assert got["argv"][1:] == ["run", "list"]
     assert got["kw"]["input"] == "in"
@@ -448,3 +448,20 @@ def test_gh_config_dir_order(monkeypatch, tmp_path):
     explicit.mkdir()
     monkeypatch.setenv("GH_CONFIG_DIR", str(explicit))
     assert actions.gh_env()["GH_CONFIG_DIR"] == str(explicit)
+
+
+def test_builds_functions_never_reach_the_real_gh_by_default():
+    """Defaults resolve actions.gh at call time, so the suite-wide guard in conftest catches them."""
+    since = dt.datetime.now(dt.UTC)
+    with pytest.raises(AssertionError, match="real gh"):
+        actions.dispatch(CFG, FOLDER, "p")
+    with pytest.raises(AssertionError, match="real gh"):
+        actions.find_run(CFG, FOLDER, since, attempts=1, sleep=lambda s: None)
+    with pytest.raises(AssertionError, match="real gh"):
+        actions.wait_run(CFG, 1, 1)
+    with pytest.raises(AssertionError, match="real gh"):
+        actions.outcome(CFG, 1, FOLDER, sleep=lambda s: None)
+    from radar.builds import repo_init
+
+    with pytest.raises(AssertionError, match="real gh"):
+        repo_init.set_secret(CFG, "x" * 60)
