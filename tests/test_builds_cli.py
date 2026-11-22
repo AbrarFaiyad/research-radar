@@ -414,7 +414,7 @@ def test_set_schedule_task_parameter(monkeypatch, tmp_path):
         ran.append(argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(schedule.os, "name", "nt")
+    monkeypatch.setattr(schedule, "_on_windows", lambda: True)
     monkeypatch.setattr(schedule.subprocess, "run", fake_run)
     monkeypatch.setattr(schedule, "get", lambda task=schedule.TASK: {"task": task})
     out = schedule.set_schedule(Path(tmp_path), "08:30", True, task="ResearchRadarBuild")

@@ -546,7 +546,7 @@ def test_symlink_in_artifact_blocks(env):
     target = env.art.parent / "outside.txt"
     target.write_text("secret")
     try:
-        os.symlink(target, env.art / "link.txt")
+        os.symlink(target, env.work / "link.txt")
     except OSError:  # Windows without symlink rights: a directory junction is also a link
         if sys.platform != "win32":
             pytest.skip("symlinks not permitted")

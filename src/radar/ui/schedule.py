@@ -24,10 +24,14 @@ def _ps(script: str, timeout: int = 60) -> subprocess.CompletedProcess:
     )
 
 
+def _on_windows() -> bool:
+    return os.name == "nt"
+
+
 def get(task: str = TASK) -> dict:
     if task not in COMMANDS:
         raise ValueError(f"unknown task {task!r}")
-    if os.name != "nt":
+    if not _on_windows():
         return {"supported": False}
     script = (
         f"$t = Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue; "
@@ -53,7 +57,7 @@ def set_schedule(
 ) -> dict:
     if task not in COMMANDS:
         raise ValueError(f"unknown task {task!r}")
-    if os.name != "nt":
+    if not _on_windows():
         raise RuntimeError("scheduling is supported on Windows only")
     if time is not None:
         if not _TIME.match(time):
