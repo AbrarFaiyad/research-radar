@@ -75,3 +75,152 @@ def test_model_tag_must_match(cfg, tmp_path):
     assert not checks["local model"].ok  # only :latest is installed
     cfg.llm.model = "mimo-v2.6"
     assert _by_name(run_checks(cfg, _probes(tmp_path)))["local model"].ok
+
+
+def _builds_probes(tmp_path, **kw):
+    base = {
+        "repo_visibility": lambda repo: "PUBLIC",
+        "gh_scopes": lambda: {"repo", "workflow"},
+        "workflow_installed": lambda repo: True,
+        "secret_names": lambda repo: {"CLAUDE_CODE_OAUTH_TOKEN"},
+    }
+    base.update(kw)
+    return _probes(tmp_path, **base)
+
+
+def test_builds_checks_absent_when_disabled(cfg, tmp_path):
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    assert "daily-builds repo" not in checks
+
+
+def test_no_docker_checks_remain(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    for name in ("WSL2", "Docker", "build image"):
+        assert name not in checks
+
+
+def test_repo_check_has_action_and_goes_green(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+    private = _by_name(
+        run_checks(cfg, _builds_probes(tmp_path, repo_visibility=lambda r: "PRIVATE"))
+    )
+    assert not private["daily-builds repo"].ok
+    assert private["daily-builds repo"].action == "https://github.com/new"
+    assert _by_name(run_checks(cfg, _builds_probes(tmp_path)))["daily-builds repo"].ok
+
+
+def test_repo_check_needs_repo_set(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, ""
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    assert not checks["daily-builds repo"].ok
+
+
+def _on(cfg):
+    cfg.builds.enabled, cfg.builds.repo = True, "someone/daily-builds"
+
+
+def test_builds_checks_all_green(cfg, tmp_path):
+    _on(cfg)
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    for name in (
+        "gh signed in with workflow scope",
+        "daily-builds repo",
+        "workflow installed",
+        "Claude subscription token secret",
+    ):
+        assert checks[name].ok, name
+
+
+def test_scope_check_fails_without_workflow_scope(cfg, tmp_path):
+    _on(cfg)
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, gh_scopes=lambda: {"repo"}))).get(
+        "gh signed in with workflow scope"
+    )
+    assert c and not c.ok and c.action.startswith("https://") and "workflow" in c.fix
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, gh_scopes=lambda: None)))[
+        "gh signed in with workflow scope"
+    ]
+    assert not c.ok
+
+
+def test_workflow_check_offers_repo_setup(cfg, tmp_path):
+    _on(cfg)
+    c = _by_name(run_checks(cfg, _builds_probes(tmp_path, workflow_installed=lambda r: False)))[
+        "workflow installed"
+    ]
+    assert not c.ok and c.action == "build-init-repo"
+
+
+def test_key_secret_check_offers_add_key(cfg, tmp_path):
+    _on(cfg)
+    for names in (set(), {"OTHER"}, None):
+        c = _by_name(run_checks(cfg, _builds_probes(tmp_path, secret_names=lambda r, n=names: n)))[
+            "Claude subscription token secret"
+        ]
+        assert not c.ok and c.action == "builds-key"
+
+
+def test_probes_receive_the_configured_repo(cfg, tmp_path):
+    _on(cfg)
+    seen = []
+    run_checks(
+        cfg,
+        _builds_probes(
+            tmp_path,
+            workflow_installed=lambda r: seen.append(("wf", r)) or True,
+            secret_names=lambda r: seen.append(("sec", r)) or {"CLAUDE_CODE_OAUTH_TOKEN"},
+        ),
+    )
+    assert seen == [("wf", "someone/daily-builds"), ("sec", "someone/daily-builds")]
+
+
+def test_builds_details_are_masked(cfg, tmp_path):
+    cfg.builds.enabled, cfg.builds.repo = True, "me@gmail.com"
+    checks = _by_name(run_checks(cfg, _builds_probes(tmp_path)))
+    assert "me@gmail.com" not in checks["daily-builds repo"].detail
+    assert "m***@gmail.com" in checks["daily-builds repo"].detail
+
+
+def test_default_probes_use_gh_with_minimal_env(monkeypatch):
+    from types import SimpleNamespace
+
+    from radar import doctor
+    from radar.builds import actions
+
+    calls = []
+
+    def fake_gh(args, **kw):
+        calls.append(args)
+        if args[:2] == ["auth", "status"]:
+            return SimpleNamespace(
+                returncode=0, stdout="  - Token scopes: 'repo', 'workflow'", stderr=""
+            )
+        if args[0] == "secret":
+            return SimpleNamespace(
+                returncode=0, stdout='[{"name": "CLAUDE_CODE_OAUTH_TOKEN"}]', stderr=""
+            )
+        if args[0] == "repo":
+            return SimpleNamespace(returncode=0, stdout='{"visibility": "PUBLIC"}', stderr="")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(actions, "gh", fake_gh)
+    assert doctor._gh_scopes() == {"repo", "workflow"}
+    assert doctor._secret_names("o/r") == {"CLAUDE_CODE_OAUTH_TOKEN"}
+    assert doctor._repo_visibility("o/r") == "PUBLIC"
+    assert doctor._workflow_installed("o/r") is True
+    assert ["api", "repos/o/r/contents/.github/workflows/build.yml"] in calls
+
+
+def test_default_probes_fail_closed(monkeypatch):
+    from radar import doctor
+    from radar.builds import actions
+
+    def boom(args, **kw):
+        raise OSError("no gh")
+
+    monkeypatch.setattr(actions, "gh", boom)
+    assert doctor._gh_scopes() is None
+    assert doctor._secret_names("o/r") is None
+    assert doctor._repo_visibility("o/r") is None
+    assert doctor._workflow_installed("o/r") is False

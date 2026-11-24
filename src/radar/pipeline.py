@@ -25,6 +25,10 @@ class LockHeld(RuntimeError):
     pass
 
 
+class StageSkipped(Exception):  # noqa: N818 - a signal, not an error
+    """Raised by a stage that chose not to run; recorded as ok and skipped, with the reason."""
+
+
 def pid_alive(pid: int) -> bool:
     """True if a process with this id is running. Never signals the process: on Windows,
     os.kill(pid, 0) would terminate it, so query it through the Win32 API instead."""
@@ -121,6 +125,8 @@ class StageResult:
     seconds: float
     detail: dict = field(default_factory=dict)
     error: str | None = None
+    optional: bool = False
+    skipped: bool = False
 
 
 @dataclass
@@ -135,14 +141,27 @@ class RunRecord:
 
 
 def run_stages(
-    stages: dict[str, Callable[[], dict]], log: Callable[[str], None] = print
+    stages: dict[str, Callable[[], dict]],
+    log: Callable[[str], None] = print,
+    optional: set[str] | frozenset[str] = frozenset(),
 ) -> RunRecord:
+    """Run every stage; the run is ok when all non-optional stages are ok."""
     rec = RunRecord(started=dt.datetime.now().isoformat(timespec="seconds"))
     for name, fn in stages.items():
         t0 = time.monotonic()
+        opt = name in optional
         try:
             detail = fn() or {}
-            res = StageResult(name, True, round(time.monotonic() - t0, 1), detail)
+            res = StageResult(name, True, round(time.monotonic() - t0, 1), detail, optional=opt)
+        except StageSkipped as e:
+            res = StageResult(
+                name,
+                True,
+                round(time.monotonic() - t0, 1),
+                error=(str(e) or "skipped")[:2000],
+                optional=opt,
+                skipped=True,
+            )
         except (Exception, SystemExit) as e:  # noqa: BLE001 - isolate stages by design
             msg = str(e) or e.__class__.__name__
             log(f"[{name}] failed: {msg}")
@@ -152,10 +171,14 @@ def run_stages(
                 round(time.monotonic() - t0, 1),
                 {"trace": traceback.format_exc(limit=3)},
                 msg[:2000],
+                optional=opt,
             )
         rec.stages.append(res)
-        log(f"[{name}] {'ok' if res.ok else 'FAILED'} in {res.seconds}s")
-    rec.ok = all(s.ok for s in rec.stages)
+        if res.skipped:
+            log(f"[{name}] skipped: {res.error}")
+        else:
+            log(f"[{name}] {'ok' if res.ok else 'FAILED'} in {res.seconds}s")
+    rec.ok = all(s.ok for s in rec.stages if not s.optional)
     rec.finished = dt.datetime.now().isoformat(timespec="seconds")
     return rec
 

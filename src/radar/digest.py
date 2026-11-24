@@ -46,6 +46,9 @@ CODEX_SCHEMA = {
                     "limitations",
                     "impact",
                     "confidence",
+                    "code_url",
+                    "license",
+                    "cpu_demo",
                 ],
                 "properties": {
                     "post_ids": {"type": "array", "items": {"type": "integer"}},
@@ -82,6 +85,9 @@ CODEX_SCHEMA = {
                     "limitations": _S,
                     "impact": {"type": "string", "enum": ["high", "medium"]},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "code_url": _S,
+                    "license": _S,
+                    "cpu_demo": {"type": "boolean"},
                 },
             },
         },
@@ -198,6 +204,14 @@ def _run_codex_once(cmd: list[str], task: str, timeout_s: int) -> None:
         raise RuntimeError(f"codex exited {proc.returncode}: {proc.stderr[-2000:]}")
 
 
+def _code_lines(p: dict) -> list[str]:
+    code = (p.get("code_url") or "").strip()
+    if not code:
+        return []
+    lic = (p.get("license") or "").strip()
+    return [f"Code: <{code}>" + (f" · license: {lic}" if lic else ""), ""]
+
+
 def render_markdown(result: dict, day: str, reviewed: int) -> str:
     items = result.get("items", [])
     out = [
@@ -220,6 +234,7 @@ def render_markdown(result: dict, day: str, reviewed: int) -> str:
             ),
             src,
             "",
+            *_code_lines(p),
             f"**What.** {p['what']}",
             "",
             f"**How.** {p['how']}",
@@ -261,6 +276,7 @@ def run_digest(
     make_audio: AudioMaker | None = None,
     log: Callable[[str], None] = print,
     today: dt.date | None = None,
+    after_codex: Callable[[Path, dict], None] | None = None,
 ) -> DigestResult | None:
     today = today or dt.date.today()
     rows = store.saved_posts(undigested_only=True, since_days=cfg.digest.backlog_days)
@@ -298,6 +314,12 @@ def run_digest(
     # before audio, so an audio failure never triggers a second Codex run.
     store.record_digest(today.isoformat(), str(folder), [r["id"] for r in rows])
     log(f"Codex kept {len(result.get('items', []))} of {len(rows)}")
+
+    if after_codex is not None:
+        try:
+            after_codex(folder, result)
+        except Exception as e:  # noqa: BLE001 - builds are optional; the digest stands
+            log(f"post-Codex hook failed: {e}")
 
     audio = None
     if make_audio is not None and result.get("items"):

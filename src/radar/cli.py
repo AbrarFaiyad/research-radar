@@ -1,7 +1,7 @@
 """Research Radar command line.
 
-Pipeline:  scan | reclassify | digest | podcast | email | daily
-Setup:     onboard | setup | connections | login | notebooklm-login | email-setup | doctor
+Pipeline:  scan | reclassify | digest | podcast [--publish] | email | build | daily
+Setup:     onboard | setup | connections | login | notebooklm-login | email-setup | builds-key | doctor
 Inspect:   status | queue | demo | ui
 
 Everything here also has a button in the control panel (`radar ui`); the panel runs these
@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import datetime as dt
 import json
 import shutil
 import sys
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 
 from . import __version__
@@ -23,7 +28,7 @@ from .classify import Classifier
 from .config import Config, load_config
 from .db import Store
 from .llm import OllamaModel
-from .pipeline import LockHeld, RunLock, run_stages, save_run
+from .pipeline import LockHeld, RunLock, StageSkipped, run_stages, save_run
 
 
 class UserError(RuntimeError):
@@ -82,14 +87,97 @@ def _audio_maker(cfg: Config):
     return lambda folder, result: make_audio(cfg, folder, result)
 
 
-def stage_digest(cfg: Config, no_audio: bool = False) -> dict:
+# The daily run waits for the workflow up to `builds.poll_min`, plus setup and a grace period;
+# a run still going after that stays `building` and `radar build --sync` finishes it later.
+BUILD_SETUP_MIN = 10
+
+
+def _sync_builds(cfg: Config) -> None:
+    """Finish unfinished builds; a failure here never stops anything else."""
+    from .builds import run as build_run
+
+    try:
+        build_run.sync_builds(cfg, log=print)
+    except Exception as e:  # noqa: BLE001
+        print(f"builds: sync crashed: {e.__class__.__name__}")
+
+
+class DailyBuild:
+    """The build that runs beside the podcast in the daily run (mode = with_digest).
+
+    It runs inside the daily command's run lock (same process), so it takes no lock itself.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.thread: threading.Thread | None = None
+        self.record = None
+        self.day = dt.date.today().isoformat()
+
+    def start(self, folder: Path, result: dict) -> None:
+        # The podcast reads `result` at the same time, so the build gets its own copy.
+        self.thread = threading.Thread(
+            target=self._run, args=(folder, copy.deepcopy(result)), daemon=True
+        )
+        self.thread.start()
+
+    def _run(self, folder: Path, result: dict) -> None:
+        from .builds import run as build_run
+
+        _sync_builds(self.cfg)  # finish unfinished builds first
+        try:
+            self.record = build_run.run_build(self.cfg, folder, result, log=print)
+        except Exception as e:  # noqa: BLE001 - a build must never break the daily run
+            print(f"builds: crashed: {e.__class__.__name__}")
+            self.record = build_run.BuildRecord(self.day, "failed", reason="build crashed")
+
+    def stage(self) -> dict:
+        from .builds.run import BuildRecord
+
+        if self.thread is None:
+            _sync_builds(self.cfg)  # no new digest today, but unfinished builds still get closed
+            raise StageSkipped("no new digest to build from")
+        budget_min = self.cfg.builds.poll_min + BUILD_SETUP_MIN
+        self.thread.join(max(budget_min, 0) * 60)
+        record = self.record
+        if self.thread.is_alive() or record is None:
+            # Not finished: keep the run if one was started (sync finishes it later).
+            from .builds.run import read_record
+
+            started = read_record(self.cfg, self.day)
+            if started is not None and started.status == "building" and started.run_id:
+                record = started
+            else:
+                record = BuildRecord(self.day, "failed", reason="build did not finish")
+        if record.status == "skipped":
+            raise StageSkipped(record.reason)
+        if record.status in ("failed", "blocked"):
+            raise RuntimeError(f"build {record.status}: {record.reason}")
+        return asdict(record)
+
+
+def stage_digest(
+    cfg: Config,
+    no_audio: bool = False,
+    after_codex: Callable | None = None,
+    out: dict | None = None,
+) -> dict:
+    """Run the digest. `out` receives the folder name as soon as the digest exists, so a caller
+    still has it when the podcast part raises."""
     from .digest import run_digest
 
     store = Store(cfg.db_path)
-    res = run_digest(cfg, store, make_audio=None if no_audio else _audio_maker(cfg))
+    res = run_digest(
+        cfg,
+        store,
+        make_audio=None if no_audio else _audio_maker(cfg),
+        after_codex=after_codex,
+    )
     if not res:
         return {"kept": 0, "reviewed": 0}
     print(f"digest: kept {res.kept} of {res.reviewed} -> {res.summary_md}")
+    if out is not None:
+        out["folder"] = res.folder.name
     if res.audio:
         print(f"audio: {res.audio}")
     elif cfg.notebooklm.enabled and not no_audio and res.kept:
@@ -126,6 +214,27 @@ def stage_podcast(cfg: Config, folder_name: str | None = None) -> dict:
     return {"folder": folder.name, "audio": out.name}
 
 
+def stage_podcast_publish(
+    cfg: Config, folder_name: str | None = None, replace: bool = False
+) -> dict:
+    """Publish the digest's episode as a GitHub release. A skip raises StageSkipped, a failure
+    RuntimeError; both carry fixed phrases."""
+    from . import podcasts
+
+    folder = cfg.digests_dir / folder_name if folder_name else _latest_digest(cfg)
+    if folder is None or not (folder / "codex_result.json").exists():
+        raise StageSkipped("no new digest to publish")
+    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
+    extra = {"replace": True} if replace else {}
+    rec = podcasts.publish(cfg, folder, result, **extra)
+    if rec["status"] == "skipped":
+        raise StageSkipped(rec.get("reason", "skipped"))
+    if rec["status"] == "failed":
+        raise RuntimeError(f"podcast publish failed: {rec.get('reason', '')}")
+    print(f"podcast: published {rec.get('page', '')}")
+    return rec
+
+
 def stage_email(
     cfg: Config, folder_name: str | None = None, today_only: bool = False, test: bool = False
 ) -> dict:
@@ -144,7 +253,7 @@ def stage_email(
         print(f"test email sent to {cfg.email.to}")
         return {"attachments": []}
     folder = cfg.digests_dir / folder_name if folder_name else _latest_digest(cfg, today_only)
-    msg = compose_daily(cfg.email, folder, cfg.queue_dir)
+    msg = compose_daily(cfg.email, folder, cfg.queue_dir, build_repo=cfg.builds.repo)
     send(cfg.email, msg)
     names = [p.get_filename() for p in msg.iter_attachments()]
     print(
@@ -187,11 +296,137 @@ def cmd_digest(cfg, args) -> int:
 
 
 def cmd_podcast(cfg, args) -> int:
+    if args.init_repo:
+        from . import podcasts
+        from .builds.actions import ActionsError
+
+        with RunLock(cfg, owner="podcast"):
+            try:
+                print(f"podcast: repo ready: {podcasts.init_repo(cfg)}")
+            except ActionsError as e:
+                raise UserError(str(e)) from None
+        return 0
+    if args.publish:
+        with RunLock(cfg, owner="podcast"):
+            try:
+                stage_podcast_publish(cfg, args.folder, replace=args.replace)
+            except StageSkipped as e:
+                print(f"podcast: skipped: {e}")
+            except RuntimeError as e:
+                raise UserError(str(e)) from None
+        return 0
     return _locked(cfg, "podcast", lambda: stage_podcast(cfg, args.folder))
 
 
 def cmd_email(cfg, args) -> int:
     return _locked(cfg, "email", lambda: stage_email(cfg, args.folder, args.today_only, args.test))
+
+
+# Separate mode: the scheduled build may start while the daily run still holds the lock.
+BUILD_LOCK_POLL_S = 60
+BUILD_LOCK_WAIT_S = 2 * 3600
+DAILY_BUSY = "daily run still in progress"
+
+
+def _build_lock(cfg: Config, wait_for_daily: bool) -> RunLock | None:
+    """Take the run lock for a build. With `wait_for_daily`, a lock held by the daily run is
+    polled every BUILD_LOCK_POLL_S for up to BUILD_LOCK_WAIT_S; None means the wait ran out.
+    Any other holder raises LockHeld at once."""
+    deadline = time.monotonic() + BUILD_LOCK_WAIT_S
+    while True:
+        lock = RunLock(cfg, owner="build")
+        try:
+            return lock.__enter__()
+        except LockHeld:
+            held = lock.holder()
+            if not wait_for_daily or (held is not None and held.get("owner") != "daily"):
+                raise
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(BUILD_LOCK_POLL_S)
+
+
+def _print_build(rec) -> None:
+    detail = rec.url if rec.status == "published" else rec.reason
+    print(" ".join(x for x in ("build:", rec.status, rec.package, detail) if x))
+
+
+def cmd_build(cfg, args) -> int:
+    from .builds import repo_init
+    from .builds import run as build_run
+    from .builds.actions import ActionsError
+
+    if args.init_repo:
+        with RunLock(cfg, owner="build"):
+            try:
+                print(f"build: daily-builds repo ready: {repo_init.init_repo(cfg)}")
+            except ActionsError as e:
+                raise UserError(str(e)) from None
+        return 0
+    if args.sync:
+        with RunLock(cfg, owner="build"):
+            finished = build_run.sync_builds(cfg)
+        for rec in finished:
+            _print_build(rec)
+        if not finished:
+            print("build: nothing to sync")
+        return 1 if any(r.status in ("failed", "blocked") for r in finished) else 0
+    # The scheduled build of separate mode builds from today's digest only.
+    separate = cfg.builds.mode == "separate" and not args.folder and not args.retry
+    today = dt.date.today().isoformat()
+    if args.folder:
+        folder = cfg.digests_dir / args.folder
+    else:
+        folder = _latest_digest(cfg, today_only=separate)
+        if folder is None and separate:
+            _print_build(build_run.record_skip(cfg, today, "no digest today"))
+            return 0
+    if folder is None or not (folder / "codex_result.json").exists():
+        raise UserError("No finished digest found.")
+    marker = folder / "build.json"
+    if marker.exists() and not args.retry:
+        try:
+            status = json.loads(marker.read_text(encoding="utf-8")).get("status", "unknown")
+        except (OSError, ValueError, AttributeError):
+            status = "unknown"
+        print(f"build: {folder.name} already has a record ({status}); use --retry to run again")
+        return 0
+    result = json.loads((folder / "codex_result.json").read_text(encoding="utf-8"))
+    lock = _build_lock(cfg, wait_for_daily=separate)
+    if lock is None:
+        _print_build(build_run.record_skip(cfg, today, DAILY_BUSY, folder))
+        return 0
+    try:
+        _sync_builds(cfg)  # otherwise a still-unrecorded publish could be built twice
+        rec = build_run.run_build(cfg, folder, result, retry=args.retry)
+    finally:
+        lock.__exit__(None, None, None)
+    _print_build(rec)
+    return 1 if rec.status in ("failed", "blocked") else 0
+
+
+def cmd_builds_key(cfg, args) -> int:
+    import getpass
+
+    from .builds import repo_init
+    from .builds.actions import ActionsError
+
+    print(
+        "Run `claude setup-token` on your PC, then paste the Claude subscription token "
+        "for daily builds (input is hidden)."
+    )
+    key = "".join(getpass.getpass("Claude subscription token: ").split())
+    if not key:
+        raise UserError("No token entered.")
+    try:
+        repo_init.set_secret(cfg, key)
+    except ActionsError as e:
+        raise UserError(str(e)) from None
+    print(
+        "Saved as the repo secret CLAUDE_CODE_OAUTH_TOKEN. "
+        "Run the first build with `radar build --retry`."
+    )
+    return 0
 
 
 def cmd_onboard(cfg, args) -> int:
@@ -279,14 +514,33 @@ def cmd_setup(cfg, args) -> int:
 
 
 def cmd_daily(cfg, args) -> int:
-    stages = {
-        "scan": lambda: stage_scan(cfg),
-        "digest": lambda: stage_digest(cfg),
-    }
-    if cfg.email.enabled:
+    build = DailyBuild(cfg) if cfg.builds.enabled and cfg.builds.mode == "with_digest" else None
+    made: dict = {}
+
+    def digest_stage() -> dict:
+        made.update(stage_digest(cfg, after_codex=build.start if build else None, out=made))
+        return made
+
+    stages = {"scan": lambda: stage_scan(cfg), "digest": digest_stage}
+    optional: set[str] = set()
+    if cfg.podcasts.enabled:
+
+        def publish_stage() -> dict:
+            if not made.get("folder"):
+                raise StageSkipped("no new digest to publish")
+            return stage_podcast_publish(cfg, made["folder"])
+
+        stages["podcast-publish"] = publish_stage
+        optional.add("podcast-publish")
+    if build:
+        stages["build"] = build.stage
+        optional.add("build")
+    if cfg.email.enabled:  # after the build, so the email can report it
         stages["email"] = lambda: stage_email(cfg, today_only=True)
     with RunLock(cfg, owner="daily"):
-        rec = run_stages(stages)
+        if cfg.builds.enabled and not build:
+            _sync_builds(cfg)  # separate mode: the build command syncs too, but not every day
+        rec = run_stages(stages, optional=optional)
     path = save_run(cfg, rec)
     print(f"run {'ok' if rec.ok else 'had failures'}: {path}")
     return 0 if rec.ok else 1
@@ -387,6 +641,14 @@ def cmd_demo(cfg, args) -> int:
     return 0
 
 
+def _stage_text(s: dict) -> str:
+    if s.get("skipped"):
+        return f"{s['name']} skipped: {s.get('error') or 'skipped'}"
+    if s["ok"]:
+        return f"{s['name']} ok"
+    return f"{s['name']} failed (optional)" if s.get("optional") else f"{s['name']} FAILED"
+
+
 def cmd_status(cfg, args) -> int:
     from .pipeline import latest_run
 
@@ -398,7 +660,7 @@ def cmd_status(cfg, args) -> int:
     print("last digest:", dict(last) if last else "none")
     run = latest_run(cfg)
     if run:
-        stages = ", ".join(f"{s['name']} {'ok' if s['ok'] else 'FAILED'}" for s in run["stages"])
+        stages = ", ".join(_stage_text(s) for s in run["stages"])
         print(f"last run: {run['started']} ({stages})")
     return 0
 
@@ -428,6 +690,17 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument(
         "folder", nargs="?", help="digest folder name, e.g. 2026-11-19 (default: latest)"
     )
+    pc.add_argument(
+        "--publish", action="store_true", help="publish the episode as a GitHub release"
+    )
+    pc.add_argument(
+        "--replace",
+        action="store_true",
+        help="with --publish: upload the episode again over the release's same-name asset",
+    )
+    pc.add_argument(
+        "--init-repo", action="store_true", help="create the public podcasts repo if missing"
+    )
     sub.add_parser(
         "notebooklm-login", help="sign in to Google once in the agent's NotebookLM browser"
     )
@@ -436,6 +709,16 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
     em.add_argument("--today-only", action="store_true", help="skip digests from earlier days")
     em.add_argument("--test", action="store_true", help="send a short test message only")
+    sub.add_parser(
+        "builds-key", help="store the Claude subscription token as the builds repo secret"
+    )
+    bd = sub.add_parser("build", help="build the day's learning demo from a digest and publish it")
+    bd.add_argument("folder", nargs="?", help="digest folder name (default: latest)")
+    bd.add_argument("--retry", action="store_true", help="run again for a day that has a record")
+    bd.add_argument("--sync", action="store_true", help="finish builds that were still running")
+    bd.add_argument(
+        "--init-repo", action="store_true", help="write the workflow files into the builds repo"
+    )
     ob = sub.add_parser("onboard", help="set up the field profile from a CV (the panel's wizard)")
     ob.add_argument("step", choices=["draft", "calibrate", "refine"])
     ob.add_argument("--source", choices=["live", "stored"], default="live")
@@ -445,7 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     cn.add_argument("file", help="LinkedIn data export ZIP, Connections.csv, or Invitations.csv")
     st = sub.add_parser("setup", help="install or sign in to a prerequisite")
     st.add_argument("what", choices=["config", "model", "chromium", "codex", "codex-login"])
-    sub.add_parser("daily", help="scan, digest, email; isolated stages and a run record")
+    sub.add_parser("daily", help="scan, digest, build, email; isolated stages and a run record")
     sub.add_parser("doctor", help="check that every prerequisite is installed and signed in")
     ui = sub.add_parser("ui", help="open the local control panel")
     ui.add_argument("--port", type=int, default=8765)
@@ -468,6 +751,8 @@ HANDLERS = {
     "connections": cmd_connections,
     "setup": cmd_setup,
     "email": cmd_email,
+    "build": cmd_build,
+    "builds-key": cmd_builds_key,
     "daily": cmd_daily,
     "doctor": cmd_doctor,
     "ui": cmd_ui,

@@ -33,6 +33,9 @@ from .jobs import ACTIONS, JobBusy, JobRunner
 
 _DIGEST_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}(-\d+)?$")
 _PROFILE_MAX = 50_000
+_BUILD_ACTIONS = ("build", "build-retry", "build-sync", "build-init-repo")
+_KEY_MIN = 20
+_GITHUB = "https://github.com/"
 
 
 def create_app(
@@ -120,10 +123,18 @@ def create_app(
                 "--max-posts",
                 str(_bounded_int(payload.get("max_posts", 40), 5, 150)),
             ]
-        if action in ("podcast", "email") and payload.get("folder"):
+        if action in (
+            "podcast",
+            "podcast-publish",
+            "email",
+            "build",
+            "build-retry",
+        ) and payload.get("folder"):
             if not _DIGEST_NAME.match(str(payload["folder"])):
                 raise HTTPException(400, "bad digest name")
             extra = [str(payload["folder"])]
+        if action == "podcast-publish" and payload.get("replace") is True:
+            extra = [*extra, "--replace"]
         try:
             return runner.start(action, extra).summary()
         except JobBusy as e:
@@ -149,13 +160,21 @@ def create_app(
 
     # ---- schedule -------------------------------------------------------------------------
     @app.get("/api/schedule")
-    def get_schedule() -> dict:
-        return schedule.get()
+    def get_schedule(task: str = schedule.TASK) -> dict:
+        try:
+            return schedule.get(task)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
 
     @app.post("/api/schedule")
     def set_schedule(payload: dict = Body(...)) -> dict:
         try:
-            return schedule.set_schedule(cfg.root, payload.get("time"), payload.get("enabled"))
+            return schedule.set_schedule(
+                cfg.root,
+                payload.get("time"),
+                payload.get("enabled"),
+                task=payload.get("task", schedule.TASK),
+            )
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
         except RuntimeError as e:
@@ -397,6 +416,81 @@ def create_app(
             store.close()
         return {"updated": n}
 
+    # ---- daily builds ---------------------------------------------------------------------
+    def build_record(day: str) -> dict:
+        if not _DIGEST_NAME.match(day):
+            raise HTTPException(400, "bad day")
+        path = fresh().builds_dir / "records" / f"{day}.json"
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise HTTPException(404, "no build for that day") from None
+        if not isinstance(rec, dict):
+            raise HTTPException(404, "no build for that day")
+        return rec
+
+    def build_links(rec: dict) -> dict:
+        """Links to show for a record: the GitHub folder it published, or the live Actions run
+        while it is building. Only https://github.com/ addresses and an integer run id pass."""
+        links: dict = {"url": "", "run_url": ""}
+        url = rec.get("url")
+        if isinstance(url, str) and url.startswith("https://github.com/"):
+            links["url"] = url
+        run_id = rec.get("run_id")
+        repo = fresh().builds.repo
+        if (
+            rec.get("status") == "building"
+            and isinstance(run_id, int)
+            and not isinstance(run_id, bool)
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or "")
+        ):
+            links["run_url"] = f"https://github.com/{repo}/actions/runs/{run_id}"
+        return links
+
+    @app.get("/api/builds")
+    def list_builds() -> dict:
+        out = []
+        for path in sorted((fresh().builds_dir / "records").glob("*.json"), reverse=True):
+            if not _DIGEST_NAME.match(path.stem):
+                continue
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict):
+                out.append({**rec, **build_links(rec)})
+        job = runner.current
+        running = job.summary() if job and job.running and job.action in _BUILD_ACTIONS else None
+        return {"builds": out, "job": running}
+
+    @app.post("/api/builds/key")
+    def builds_key(payload: dict = Body(...)) -> dict:
+        from ..builds.actions import ActionsError
+        from ..builds.repo_init import set_secret
+
+        key = "".join(str(payload.get("key", "")).split())
+        if len(key) < _KEY_MIN:
+            raise HTTPException(
+                400,
+                f"that does not look like a Claude subscription token (under {_KEY_MIN} characters)",
+            )
+        try:
+            set_secret(fresh(), key)
+        except ActionsError as e:
+            raise HTTPException(400, str(e)) from None
+        return {"saved": True}
+
+    @app.get("/api/builds/{day}")
+    def build_detail(day: str) -> dict:
+        rec = build_record(day)
+        digests = sorted(
+            (p.name for p in fresh().digests_dir.glob(f"{day}*") if _DIGEST_NAME.match(p.name)),
+        )
+        return {
+            "record": {**rec, **build_links(rec)},
+            "digest": digests[0] if digests else None,
+        }
+
     # ---- digests --------------------------------------------------------------------------
     def digest_folder(name: str) -> Path:
         if not _DIGEST_NAME.match(name):
@@ -405,6 +499,22 @@ def create_app(
         if not (folder / "summary.md").exists():
             raise HTTPException(404, "no such digest")
         return folder
+
+    def podcast_record(folder: Path) -> dict | None:
+        """The publish result for the panel: status, a release link only if it is a GitHub
+        address, and the reason for a skip or failure."""
+        try:
+            rec = json.loads((folder / "podcast.json").read_text(encoding="utf-8"))
+            status, page = rec["status"], rec.get("page")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if not isinstance(status, str):
+            return None
+        ok = status == "published" and isinstance(page, str) and page.startswith(_GITHUB)
+        out: dict = {"status": status, "page": page if ok else None}
+        if status != "published" and isinstance(rec.get("reason"), str):
+            out["reason"] = rec["reason"]
+        return out
 
     @app.get("/api/digests")
     def list_digests() -> list[dict]:
@@ -434,6 +544,8 @@ def create_app(
                     "notebook": url_file.read_text(encoding="utf-8").strip()
                     if url_file.exists()
                     else None,
+                    "podcast": podcast_record(folder),
+                    "podcasts_enabled": bool(fresh().podcasts.enabled),
                 }
             )
         return out

@@ -143,3 +143,78 @@ def test_oversize_m4a_is_reencoded_to_fit(tmp_path):
     assert mp3.suffix == ".mp3" and mp3.stat().st_size <= small_budget
     assert abs(duration_seconds(mp3) - 20) < 1.5
     assert email_ready(src, budget_bytes=10**9) == src  # fits: attached unchanged
+
+
+def _body(tmp_path, build: dict | None, repo: str = ""):
+    d, q = _digest(tmp_path)
+    if build is not None:
+        (d / "build.json").write_text(__import__("json").dumps(build), encoding="utf-8")
+    msg = mailer.compose_daily(CFG, d, q, today=dt.date(2026, 11, 19), build_repo=repo)
+    return msg.get_body(("plain",)).get_content()
+
+
+def test_email_build_line_published(tmp_path):
+    body = _body(
+        tmp_path,
+        {"status": "published", "package": "ase", "url": "https://github.com/o/r/x", "folder": "f"},
+    )
+    assert "**Daily build:** ase → https://github.com/o/r/x" in body
+    assert "did not run" not in body
+
+
+def test_email_build_line_did_not_run(tmp_path):
+    body = _body(
+        tmp_path,
+        {"status": "did_not_run", "package": "ase", "url": "https://github.com/o/r/x"},
+    )
+    assert "**Daily build:** ase → https://github.com/o/r/x (did not run; see the notebook)" in body
+
+
+def test_email_build_line_skipped_reason_only(tmp_path):
+    body = _body(
+        tmp_path,
+        {"status": "skipped", "reason": "no suitable item", "folder": "secret-folder"},
+    )
+    assert "Daily build skipped: no suitable item" in body
+    assert "secret-folder" not in body
+
+
+def test_email_build_line_absent(tmp_path):
+    assert "Daily build" not in _body(tmp_path, None)
+
+
+def test_email_build_line_after_podcast_line(tmp_path):
+    d, q = _digest(tmp_path)
+    (d / "notebook_url.txt").write_text("https://notebooklm.google.com/x", encoding="utf-8")
+    (d / "build.json").write_text(
+        '{"status": "skipped", "reason": "build failed"}', encoding="utf-8"
+    )
+    body = mailer.compose_daily(CFG, d, q).get_body(("plain",)).get_content()
+    assert body.index("**Podcast:**") < body.index("Daily build skipped") < body.index("#")
+
+
+@pytest.mark.parametrize("status", ["failed", "blocked", "skipped"])
+def test_email_build_line_uses_real_status(tmp_path, status):
+    body = _body(tmp_path, {"status": status, "reason": "why"})
+    assert f"Daily build {status}: why" in body
+
+
+def test_email_build_line_building_links_the_run(tmp_path):
+    body = _body(tmp_path, {"status": "building", "run_id": 4242}, repo="own/builds")
+    assert "Daily build still running: https://github.com/own/builds/actions/runs/4242" in body
+
+
+@pytest.mark.parametrize(
+    ("build", "repo"),
+    [
+        ({"status": "building", "run_id": "4242"}, "own/builds"),
+        ({"status": "building", "run_id": True}, "own/builds"),
+        ({"status": "building", "run_id": 4242}, ""),
+        ({"status": "building", "run_id": 4242}, "bad repo/x y"),
+        ({"status": "building"}, "own/builds"),
+    ],
+)
+def test_email_build_line_building_needs_int_run_and_repo(tmp_path, build, repo):
+    body = _body(tmp_path, build, repo=repo)
+    assert "actions/runs" not in body
+    assert "Daily build still running" in body

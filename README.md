@@ -19,6 +19,7 @@ Jump to: [Architecture](#architecture) · [Control panel](#control-panel) · [In
 - Sends every saved post to Codex, which keeps the 5 to 15 items with real impact, finds their primary sources and related coverage, and writes the digest.
 - Turns the digest into a NotebookLM Audio Overview, a two-host podcast.
 - Emails the digest, queue, and podcast to the owner each day.
+- Optionally builds one small demo notebook per day of the top open-source item on GitHub Actions and publishes it to a public repo. Nothing is installed on your PC. It is off by default.
 - Sets itself up from the control panel: a wizard builds your field profile from a CV, and every missing prerequisite has a fix button.
 - Lets you run any step, change settings and the schedule, and work through the queue and past digests, all from the panel.
 - Checks its own setup and records every daily run, stage by stage.
@@ -60,11 +61,17 @@ flowchart TD
         N4 -- no --> N5["Re-encode to MP3"]
     end
 
+    subgraph BUILD["Optional: daily build"]
+        B1["Daily build (optional)<br/>GitHub Actions build job → publish job with leak scan → public daily-builds repo"]
+    end
+
     C4 --> N1
+    C4 --> B1
     C4 --> E1
     Q --> E1
     N4 -- yes --> E1
     N5 --> E1
+    B1 --> E1
     E1(["5. Gmail to you<br/>digest, queue, podcast attached"])
 ```
 
@@ -80,6 +87,7 @@ MCP is the Model Context Protocol, which connects the Python orchestrator to the
 | Connections | `src/radar/connections.py` | Reads LinkedIn's data export so connections stay out of the queue |
 | Digest | `src/radar/digest.py`, `prompts/codex_digest.md` | Sends candidates to Codex and renders its result |
 | Podcast | `src/radar/notebooklm.py` | Builds a notebook and downloads the Audio Overview |
+| Daily builds | `src/radar/builds/` | `select` picks the item, `actions` starts the workflow run on GitHub and waits for it, `run` coordinates the build and writes the records, `repo_init` sets up the public repo and stores the subscription token secret, `scan` checks every file for leaks, and `template/` holds the workflow that runs in the public repo |
 | Email | `src/radar/mailer.py` | Sends the daily email through Gmail SMTP |
 | Pipeline | `src/radar/pipeline.py` | Runs stages in isolation, holds the run lock, writes run records |
 | Health checks | `src/radar/doctor.py` | Checks every prerequisite and prints the fix for each gap |
@@ -111,10 +119,10 @@ Open it with the **Research Radar** shortcut on the desktop or in the Start menu
 | Dashboard | See saved posts, queue size, the last digest, the next scheduled run, and the run history with each stage's result. Start a full run or any single step, watch its log live, and cancel it. Check setup health and launch the LinkedIn and NotebookLM logins. |
 | Setup | Build your field profile with the wizard (below). Work through a checklist of prerequisites, each with a button that fixes it: create the config, download the local model, install the agent browser and Codex, sign in to Codex, LinkedIn, and NotebookLM. Import your LinkedIn connections. Store the Gmail App Password and send a test email. |
 | Schedule | Change the daily run time or switch it off. |
-| Settings | Edit every setting in a validated form: scan limits and pacing, local model, Codex selection limits, podcast length, email. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
+| Settings | Edit every key of `config/config.toml` in a validated form. Technical keys sit under a collapsed Advanced group in each section: the browser server command and arguments (one per line), the feed address, the Ollama address, the Codex command, the mail server and port, and the build records folder. Bad values are rejected with a message and the file is left untouched. Comments in `config/config.toml` are kept. |
 | Field profile | Edit what counts as relevant, then re-judge stored posts in one click. |
 | Connection queue | **Send** opens the person's profile in your own browser; you click Connect there, then confirm in the panel ("Yes, sent" or "Already connected"). **Skip** drops them, and **Undo** brings them back. The agent never acts on LinkedIn. Download the list as CSV. |
-| Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, or email a digest again. |
+| Digests | Read past digests, play their podcasts, open their NotebookLM notebooks, remake a podcast, publish it to GitHub, or email a digest again. A published podcast shows a link to its release. |
 
 ### Setup wizard
 
@@ -231,8 +239,12 @@ You never need the command line after installing; every command here is a button
 | `radar reclassify` | Re-judge stored posts with the current profile; newly relevant posts get their links resolved | Field profile, Save and re-judge |
 | `radar digest [--no-audio]` | Codex selects, sources, and summarizes the strongest 5 to 15 undigested posts, then NotebookLM makes the podcast | Dashboard, Digest |
 | `radar podcast [folder]` | Make the podcast again for a digest | Digests, Make podcast |
+| `radar podcast [folder] --publish` | Publish a digest's episode as a release in the podcasts repo. A day that was skipped or failed can be retried | Digests, Publish podcast |
+| `radar podcast --init-repo` | Create the public podcasts repo and its README if missing | Digests, Set up podcasts repo |
 | `radar email [folder] [--test]` | Email a digest, or a short test message | Digests and Setup |
-| `radar daily` | Scan, digest, and email as isolated stages, with a run record | Dashboard, Full daily run |
+| `radar daily` | Scan, digest, build (when enabled), and email as isolated stages, with a run record | Dashboard, Full daily run |
+| `radar build [folder] [--retry] [--sync] [--init-repo]` | Start the day's demo build on GitHub Actions from a digest. `--retry` runs a day that already has a record again. `--sync` finishes builds that were still running. `--init-repo` installs the workflow in the public repo once | Daily builds, Build now, Retry, Sync, Set up repo |
+| `radar builds-key` | Store the Claude subscription token as the `CLAUDE_CODE_OAUTH_TOKEN` secret of the daily-builds repo (hidden prompt). Create the token with `claude setup-token` | Setup, Claude subscription token (daily builds) |
 | `radar queue [mark <url> sent]` | Export the connection queue or mark a person | Connection queue |
 | `radar status` | Database counts, queue size, latest digest, last run | Dashboard |
 | `radar demo` | Classify synthetic posts into `data/demo/` with the local model | Setup, Offline demo |
@@ -241,11 +253,12 @@ Codex reviews every candidate once, and saved posts older than three days (`back
 
 ## Engineering
 
-- **Stage isolation.** `radar daily` runs scan, digest, and email as separate stages. A failed stage is recorded with its error, and the later stages still run, so a logged-out LinkedIn session still lets the backlog digest and the email go out. The command exits with code 1 when any stage fails, which Task Scheduler records.
+- **Stage isolation.** `radar daily` runs scan, digest, build (when enabled), and email as separate stages. A failed stage is recorded with its error, and the later stages still run, so a logged-out LinkedIn session still lets the backlog digest and the email go out. The command exits with code 1 when any stage fails, which Task Scheduler records.
 - **Run records.** Each daily run writes `data/runs/<timestamp>.json` with every stage's outcome, duration, counts, and error. The dashboard and `radar status` read them.
 - **One run at a time.** A lock file in `data/` stops the scheduled task, the panel, and the command line from running jobs at once. A lock is created atomically; one whose process has exited, or older than six hours, counts as stale.
 - **Read-only by construction.** The LinkedIn browser client cannot reach any click or type tool. The NotebookLM client can, but only while the page is on NotebookLM's own hosts. Tests cover both.
 - **Validated settings.** Settings have a typed schema with ranges and cross-field rules, such as minimum items not exceeding maximum items. Saves are atomic and keep the file's comments.
+- **Build isolation.** Builds run on a GitHub-hosted runner that is discarded afterwards, in a job with a read-only token. A second job holds the write token, never sees the subscription token, and never runs build code. It scans every file for key patterns, local paths, and oversized files before it commits. Your computer checks the outgoing prompt for personal information before it sends it. Tests check that only the public prompt and the folder name leave the PC.
 - **Privacy.** `data/` and `config/config.toml` are gitignored. Tests use synthetic posts. A CV is stripped of email addresses, phone numbers, and profile links before any model reads it, only the redacted text is kept, and the wizard lets you keep it on your computer by drafting with the local model. The LinkedIn export is read in memory; only names, profile links, and dates are stored. Health checks mask email addresses and home-folder paths.
 - **Quality gates.** GitHub Actions runs Ruff lint, a format check, and the full test suite on Ubuntu and Windows for every push and pull request. Pre-commit runs the same checks locally.
 
@@ -293,6 +306,91 @@ Email goes out through Gmail SMTP with an App Password. An App Password is a 16-
 3. Press **Send a test email**.
 
 To revoke access, delete the App Password in your Google account.
+
+## Daily podcasts
+
+The daily run can publish each podcast episode to GitHub. The feature is off by default.
+
+What is published, for each day:
+
+- the episode audio file, converted to a smaller MP3 when it is too large for email;
+- a title made of the date and the digest headline;
+- the release notes, which list each kept item's title and its primary link.
+
+Where it goes: one release per day, tagged with the digest date, in a public repo that you own. The release page is `https://github.com/<owner>/<repo>/releases/tag/<date>`. The Digests tab links to it, and the daily email gets a "Podcast online" line.
+
+Privacy: the audio is a NotebookLM discussion of public research news. Your field profile, your posts, your connection queue and your local paths are not published. Before publishing, the title and notes are checked for personal information, such as your name, email address, or local paths. If the check finds any, the day is skipped and the reason is shown. A public repo is visible to everyone, so do not point the setting at a private repo you want to keep private.
+
+Set up:
+
+1. On the Settings tab, under Podcast publishing, turn the feature on and enter the repo as `owner/name`.
+2. On the Digests tab, press **Set up podcasts repo**. This creates the public repo with a short README if it does not exist.
+3. Run the daily run, or press **Publish podcast** on a digest. The Setup tab shows a "daily-podcasts repo" check once the feature is on.
+
+A day that was skipped or failed can be published again with **Publish podcast**.
+
+## Daily builds
+
+Reading about a package is not the same as using it. Once a day, Research Radar picks one open-source item from the digest. Claude then builds a very small, complete demo notebook with it. The build uses your Claude subscription in three passes: Sonnet plans, Haiku implements, and Sonnet reviews. Each pass uses the latest model of its family. The notebook is a learning kit that shows what the package is for and how to go from a blank folder to a result.
+
+The build runs on GitHub Actions, not on your PC. Nothing is installed locally. Builds are published to one public GitHub repo. The feature is off by default.
+
+### What a build contains
+
+Each build is one folder named `YYYY-MM-DD_<package>_<task>`, in lowercase with hyphens, for example `2026-11-21_mace-torch_lora-finetune-molten-salt`. The folder holds:
+
+- `demo.ipynb`: the learning notebook. It opens with an executive summary, then walks through the package in runnable cells. GitHub renders it, and the workflow runs it top to bottom, so the published copy shows real output.
+- `README.md`: the same summary and how to run the notebook.
+- `requirements.txt`: pinned versions.
+- `output/`: small results, such as a PNG plot or a table.
+- `BUILD_LOG.md`: what Claude tried, what failed, and how it was fixed.
+
+The top-level README of the public repo lists every build with its date, package, what it shows, and whether the notebook ran. A notebook that did not finish carries a banner at its top.
+
+### How a build runs
+
+1. Research Radar picks the item and renders the build prompt from the item's public fields and the committed field profile.
+2. It starts the `build.yml` workflow in your daily-builds repo with `gh workflow run`. Only the prompt and the folder name are sent.
+3. The build job runs Claude Code three times with the prompt and your subscription token: a Sonnet planning pass (10 minutes at most), a Haiku implementation pass (25 minutes), and a Sonnet review pass (15 minutes). A pass that fails or times out does not stop the next step. The job then runs the notebook with papermill. The job's GitHub token is read-only. The job times out after 60 minutes, and each notebook cell after 10 minutes.
+4. The publish job downloads the result. It has no subscription token and runs no build code. It rejects links and non-regular files, strips PNG metadata, scans every file, and commits as `github-actions[bot]` with UTC time.
+5. Research Radar waits for the run, by default 90 minutes (`poll_min` under `[builds]`). A run still going then is recorded as `building`, and the panel shows a link to it. The next daily run, or the **Sync** button, records its result.
+
+### When it runs
+
+By default, the build starts as soon as Codex finishes the digest. It runs alongside the podcast, and the daily email reports the result. A failed or skipped build never fails the daily run.
+
+In Settings you can instead run builds on their own schedule, at a time you choose. That build uses the latest finished digest of the day and skips if there is none. If the daily run is still going at that time, the build waits for it for up to two hours.
+
+The build takes the highest-ranked digest item that has a code link, an OSI-approved license, and a demo that runs on a CPU in about 10 minutes. It skips packages it has already built. If no item qualifies, the day is recorded as skipped.
+
+### Safety model
+
+No personal information may leave your computer through a build. The rules are:
+
+- Only public data is sent. GitHub receives the selected item's public fields, the field profile as last committed to this repository, the build instructions, and the folder name. That profile is the committed profile in this repository (push it to make it public), so nothing beyond it is exposed. Before it sends anything, your computer checks the rendered prompt for your email addresses, user name, host name, home folder, local paths, and key patterns. If it finds one, the build is skipped. The runner has no list of your personal details, so this check cannot happen there. The wizard and the Field profile tab change the working copy, so a build skips while `config/field_profile.md` has uncommitted changes. The database, queue, connections, CV, settings, email details, and browser profiles stay on your PC. The runner never sees them.
+- The build job is untrusted. It has a read-only token, so a malicious package cannot push to the repo or change the workflow.
+- The build job can read the subscription token. The token gives access to your Claude subscription until you revoke it in your Claude account. Builds count against your subscription usage limits, and there is no spend cap. Revoke the token if anything looks wrong, and use it for nothing else.
+- Runners have open internet. There is no allowlist, so build code can send data anywhere. That matters little because nothing personal is on the runner. The token is the one secret it holds.
+- The publish job never receives the subscription token and never runs build output. A check in the build job looks for the token in the output, and the build is not published if it finds it.
+- The Actions logs of a public repo are public. They hold the step output and do not print the prompt. Masking hides only the exact secret text, so a logs page is not a safe place for the token. The Claude output of each pass goes to a file that is not uploaded.
+- Before any commit, every file is scanned for key patterns, local paths such as `C:\Users\<name>`, and files over the size limit (5 MB per file, 20 MB per build). If anything is found, the build is blocked and not published. Only PNG and SVG images are allowed.
+- Commits are made by `github-actions[bot]`, so they carry no name, email, or time zone of yours.
+- A build whose notebook did not run is still published. Its notebook opens with a "did not run" banner, and the index says so.
+- The one commit made from your PC is the one-time repo setup. It carries the git name and GitHub noreply email you configure, so choose a name you are happy to publish.
+
+The scan has limits. It cannot detect data deliberately hidden in image pixels. The real protection is that the runner never holds anything personal. A person does not review a build before it is published.
+
+### Set up daily builds
+
+1. Create a public GitHub repo with `main` as its default branch, for example `daily-builds`.
+2. Sign in with the GitHub CLI and add the `workflow` scope: `gh auth refresh -s workflow`.
+3. On the Settings tab, enable Daily builds. Enter the repo, your git name, and your GitHub noreply email (`<id>+<username>@users.noreply.github.com`, shown at github.com/settings/emails). Settings and the setup refuse any other address. The name and email are used only for the one-time setup commit.
+4. On the Daily builds tab, press **Set up repo**. This commits the workflow and the leak-scan tools to the repo once.
+5. Run `claude setup-token` on your PC and copy the token. On the Setup tab, paste it into Claude subscription token (daily builds), or run `radar builds-key`. It is saved as the repo's encrypted `CLAUDE_CODE_OAUTH_TOKEN` secret and never stored on your PC. The panel never shows it again.
+
+The checklist on the Setup tab shows each step as a check with a fix button. The Daily builds tab lists every build with its status and a link to its folder on GitHub, where the notebook and outputs are. It also has Build now, Sync, and Retry buttons.
+
+Build records and history stay on your PC, outside this repository, in `%LOCALAPPDATA%\ResearchRadar\builds` on Windows and `~/.local/share/research-radar/builds` elsewhere. They hold only the day, status, package, folder, and links. Set `work_dir` under `[builds]` to use another folder.
 
 ## Customizing the field
 

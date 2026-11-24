@@ -1,9 +1,11 @@
 import json
+import smtplib
 from pathlib import Path
 
 import pytest
 
-from radar.config import load_config
+from radar.builds import actions
+from radar.config import BuildsCfg, EmailCfg, NotebookLMCfg, PodcastsCfg, load_config
 from radar.db import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -91,10 +93,54 @@ def store():
     s.close()
 
 
+@pytest.fixture(autouse=True)
+def _build_data_in_tmp(tmp_path, monkeypatch):
+    """The default build data folder (user app data) points into the test's temp folder."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_mail(monkeypatch):
+    """No test may open an SMTP connection."""
+
+    def refuse(*a, **k):
+        raise AssertionError("tests must not send email")
+
+    monkeypatch.setattr(smtplib, "SMTP", refuse)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+
+REAL_GH = actions.gh
+
+
+@pytest.fixture
+def real_gh():
+    """The real gh wrapper, for a test that fakes subprocess.run underneath it."""
+    return REAL_GH
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gh(monkeypatch):
+    """No test may run the real gh: tests inject a fake, or the call fails loudly."""
+
+    def refuse(*a, **k):
+        raise AssertionError("tests must not run the real gh")
+
+    monkeypatch.setattr(actions, "gh", refuse)
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = load_config(root=Path(__file__).resolve().parents[1])
     c.data_dir = tmp_path / "data"
+    # never the owner's real builds settings (config.toml may enable them for the real repo)
+    c.builds = BuildsCfg(work_dir=str(tmp_path / "builds"))
+    # same for podcast publishing: disabled, never the owner's repo
+    c.podcasts = PodcastsCfg()
+    # never the owner's real email or NotebookLM settings
+    c.email = EmailCfg()
+    c.notebooklm = NotebookLMCfg(enabled=False)
     return c
 
 

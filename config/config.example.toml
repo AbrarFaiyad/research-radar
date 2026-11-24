@@ -8,6 +8,9 @@ field_profile = "config/field_profile.md"
 # Who the digest and podcast are for. Change this and config/field_profile.md for your field.
 reader = "a computational materials science PhD student working on machine-learning interatomic potentials, DFT, and molecular dynamics"
 
+# Names, handles or words that must never be published; the publish scans check them.
+private_markers = []
+
 [browser]
 # Playwright MCP server, pinned. Uses its own persistent profile; log in once with `radar login`.
 mcp_command = "npx"
@@ -60,3 +63,26 @@ sender = ""               # Gmail account that sends; empty = same as `to`
 smtp_host = "smtp.gmail.com"
 smtp_port = 587
 subject_prefix = "Research Radar"
+
+[builds]
+# Daily learning build: an AI-built demo of one digest item, made by a GitHub Actions workflow in
+# your own public repo (set it up once with `radar build --init-repo`). Off until you set `repo`
+# and store an Anthropic API key (`radar builds-key`, kept only as a secret in that repo).
+# Only the item's public fields and config/field_profile.md are sent to the workflow.
+enabled = false
+mode = "with_digest"      # with_digest | separate
+separate_time = "08:30"   # used when mode = "separate"
+repo = ""                 # owner/name of the GitHub repo that receives the builds
+git_name = ""             # commit author: your GitHub noreply identity
+git_email = ""            # must be your GitHub noreply address (...@users.noreply.github.com)
+# Build records and logs. Empty = %LOCALAPPDATA%\ResearchRadar\builds on Windows,
+# ~/.local/share/research-radar/builds elsewhere. Keep it out of synced folders.
+work_dir = ""
+poll_min = 90             # minutes the daily run waits for the workflow (5-240)
+
+[podcasts]
+# Publish each day's podcast episode as a GitHub Release in a public repo (set it up once with
+# `radar podcast --init-repo`). Only the episode, a title and the kept items' titles and links are
+# published. Off until you set `repo`.
+enabled = false
+repo = ""                 # owner/name of the public GitHub repo that receives the episodes

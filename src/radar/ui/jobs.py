@@ -16,6 +16,8 @@ ACTIONS: dict[str, list[str]] = {
     "scan": ["scan"],
     "digest": ["digest"],
     "podcast": ["podcast"],
+    "podcast-publish": ["podcast", "--publish"],
+    "podcast-init-repo": ["podcast", "--init-repo"],
     "email": ["email"],
     "reclassify": ["reclassify"],
     "doctor": ["doctor"],
@@ -31,6 +33,10 @@ ACTIONS: dict[str, list[str]] = {
     "setup-codex": ["setup", "codex"],
     "setup-codex-login": ["setup", "codex-login"],
     "email-test": ["email", "--test"],
+    "build": ["build"],
+    "build-retry": ["build", "--retry"],
+    "build-sync": ["build", "--sync"],
+    "build-init-repo": ["build", "--init-repo"],
 }
 
 

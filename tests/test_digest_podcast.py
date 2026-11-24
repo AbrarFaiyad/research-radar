@@ -88,6 +88,9 @@ FAKE_RESULT = {
             "limitations": "l",
             "impact": "high",
             "confidence": "high",
+            "code_url": "https://github.com/example/lora",
+            "license": "MIT",
+            "cpu_demo": True,
         }
     ],
     "rejected": [{"post_id": 2, "reason": "HPC, low signal"}],
@@ -230,3 +233,73 @@ def test_local_model_retries_transient_errors(monkeypatch):
 
     monkeypatch.setattr(httpx, "post", fake_post)
     assert m.json_chat("s", "u", {}) == {"ok": True}
+
+
+def _runner(cmd, task):
+    with open(cmd[cmd.index("-o") + 1], "w", encoding="utf-8") as f:
+        json.dump(FAKE_RESULT, f)
+
+
+def test_cpu_demo_is_judged_from_docs_not_a_run(cfg):
+    # Codex runs read-only and cannot run a demo; "true only if it can run" made it
+    # answer false for every item, so no daily build was ever picked.
+    template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
+    line = next(ln for ln in template.splitlines() if "cpu_demo:" in ln)
+    assert "do not need to run" in line
+    assert "true only if" not in line
+
+
+def test_schema_has_build_fields():
+    item = CODEX_SCHEMA["properties"]["items"]["items"]
+    assert {"code_url", "license", "cpu_demo"} <= set(item["required"])
+    assert item["properties"]["cpu_demo"]["type"] == "boolean"
+
+
+def test_after_codex_runs_before_audio(cfg, store):
+    _seed(store)
+    order = []
+
+    def make_audio(folder, result):
+        order.append("audio")
+
+    run_digest(
+        cfg,
+        store,
+        runner=_runner,
+        make_audio=make_audio,
+        after_codex=lambda f, r: order.append("build"),
+        log=lambda s: None,
+        today=TODAY,
+    )
+    assert order == ["build", "audio"]
+
+
+def test_after_codex_error_does_not_stop_digest(cfg, store):
+    _seed(store)
+    order, logs = [], []
+
+    def hook(folder, result):
+        raise RuntimeError("docker missing")
+
+    def make_audio(folder, result):
+        order.append("audio")
+        return None
+
+    res = run_digest(
+        cfg,
+        store,
+        runner=_runner,
+        make_audio=make_audio,
+        after_codex=hook,
+        log=logs.append,
+        today=TODAY,
+    )
+    assert res is not None and res.kept == 1 and order == ["audio"]
+    assert any("docker missing" in line for line in logs)
+
+
+def test_render_shows_code_and_license():
+    md = render_markdown(FAKE_RESULT, "d", 3)
+    assert "Code: <https://github.com/example/lora>" in md and "MIT" in md
+    bare = dict(FAKE_RESULT, items=[dict(FAKE_RESULT["items"][0], code_url="", license="")])
+    assert "Code:" not in render_markdown(bare, "d", 3)
