@@ -43,7 +43,7 @@ Fields:
   - impact: "high" or "medium".
   - code_url: the public code repository or package page for the work; an empty string if there is none.
   - license: the SPDX id of that repository's license; an empty string if unknown.
-  - cpu_demo: true only if a tiny demo of the work can run on a laptop CPU in under 10 minutes; otherwise false.
+  - cpu_demo: judge from the repository's README and documentation; you do not need to run anything. true if the docs show the code runs on CPU and a small example (a pretrained model, a toy system, or a short script) would plausibly finish on a laptop in under 10 minutes. false if it needs a GPU, a cluster, a paid API key, or a download larger than about 2 GB.
 - podcast_focus: 2 to 4 sentences telling a podcast host what to emphasize: which items lead, the how and why of each, and the takeaways for this reader.
 
 ## Candidates

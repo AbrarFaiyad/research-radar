@@ -240,6 +240,15 @@ def _runner(cmd, task):
         json.dump(FAKE_RESULT, f)
 
 
+def test_cpu_demo_is_judged_from_docs_not_a_run(cfg):
+    # Codex runs read-only and cannot run a demo; "true only if it can run" made it
+    # answer false for every item, so no daily build was ever picked.
+    template = (cfg.root / "prompts" / "codex_digest.md").read_text(encoding="utf-8")
+    line = next(ln for ln in template.splitlines() if "cpu_demo:" in ln)
+    assert "do not need to run" in line
+    assert "true only if" not in line
+
+
 def test_schema_has_build_fields():
     item = CODEX_SCHEMA["properties"]["items"]["items"]
     assert {"code_url", "license", "cpu_demo"} <= set(item["required"])

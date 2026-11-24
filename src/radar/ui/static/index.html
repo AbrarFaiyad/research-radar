@@ -248,13 +248,6 @@ textarea.mid { min-height: 380px; }
     <div id="c-info" class="note"></div>
   </div>
 
-  <div class="card" style="margin-top:16px" id="build-key-card">
-    <h2>Claude subscription token (daily builds)</h2>
-    <p class="muted" style="margin-top:0">Daily builds run on your Claude subscription and count against its usage limits. The token is stored as the encrypted secret <code>CLAUDE_CODE_OAUTH_TOKEN</code> in your daily-builds repo, never on this PC, and is never shown again. The build job can read it, and it gives access to your subscription until you revoke it in your Claude account, so revoke it if anything looks wrong.</p>
-    <div class="field"><label for="b-key">Claude subscription token (daily builds) <div class="help">run <code>claude setup-token</code> on your PC and paste the token; it is stored only as the repo secret</div></label><input id="b-key" type="password" autocomplete="off" class="wide"></div>
-    <div class="row" style="margin-top:8px"><button class="btn primary" id="b-key-save">Save token</button></div>
-  </div>
-
   <div class="card" style="margin-top:16px" id="email-card">
     <h2>Daily email</h2>
     <p class="muted" style="margin-top:0">The digest, podcast, and connection list arrive from your own Gmail. Gmail needs an <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">App Password</a> (2-Step Verification must be on). It is stored in Windows Credential Manager, never in a file.</p>
@@ -329,6 +322,12 @@ textarea.mid { min-height: 380px; }
     <button class="btn" id="b-sync">Sync</button>
     <button class="btn" id="b-init">Set up repo</button>
     <span class="muted" id="b-job">Builds the latest digest's best package. Turn builds on in Settings first.</span>
+  </div>
+  <div class="card" style="margin-bottom:16px" id="build-key-card">
+    <h2>Claude subscription token</h2>
+    <p class="muted" style="margin-top:0">Daily builds run on your Claude subscription and count against its usage limits. The token is stored as the encrypted secret <code>CLAUDE_CODE_OAUTH_TOKEN</code> in your daily-builds repo, never on this PC, and is never shown again. Saving a new token replaces the old one. The build job can read it, and it gives access to your subscription until you revoke it in your Claude account, so revoke it if anything looks wrong.</p>
+    <div class="field"><label for="b-key">Claude subscription token <div class="help">run <code>claude setup-token</code> on your PC and paste the token; it is stored only as the repo secret</div></label><input id="b-key" type="password" autocomplete="off" class="wide"></div>
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="b-key-save">Save token</button></div>
   </div>
   <table><thead><tr><th>Date</th><th>Package</th><th>Task</th><th>Status</th><th>Link</th></tr></thead>
   <tbody id="b-body"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody></table>
@@ -412,7 +411,7 @@ async function loadChecks() {
 function runFix(action) {
   if (action === "schedule") return openTab("schedule");
   if (action === "email-password") { openTab("setup"); $("#email-card").scrollIntoView({behavior: "smooth"}); return $("#e-to").focus(); }
-  if (action === "builds-key") { openTab("setup"); $("#build-key-card").scrollIntoView({behavior: "smooth"}); return $("#b-key").focus(); }
+  if (action === "builds-key") { openTab("builds"); $("#build-key-card").scrollIntoView({behavior: "smooth"}); return $("#b-key").focus(); }
   if (action === "onboard") { openTab("setup"); return $("#wizard").scrollIntoView({behavior: "smooth"}); }
   startJob({action});
 }
@@ -501,10 +500,16 @@ async function loadSettings() {
     else input = `<input type="${f.kind === "email" ? "email" : "text"}" name="${f.id}" value="${esc(v)}">`;
     return `<div class="field"><label for="${f.id}">${esc(f.label)}${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}</label><div>${input}<div class="err" data-err="${f.id}"></div></div></div>`;
   };
+  // secrets are never part of config.toml; these rows open the card that stores each one
+  const SECRETS = {builds: ["Claude subscription token", "Stored as a secret in your daily-builds repo", "builds-key", "Set token"],
+    email: ["Email app password", "Stored in Windows Credential Manager", "email-password", "Set password"]};
+  const secretRow = sec => { const s = SECRETS[sec]; if (!s) return "";
+    return `<div class="field"><label>${esc(s[0])}<div class="help">${esc(s[1])}</div></label><div><button type="button" class="btn" data-fix="${s[2]}">${esc(s[3])}</button></div></div>`; };
   $("#settings-form").innerHTML = Object.entries(bySec).map(([sec, fs]) => {
     const adv = fs.filter(f => f.advanced);
-    return `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.filter(f => !f.advanced).map(fieldRow).join("")}${adv.length ? `<details style="margin:0 0 10px"><summary class="muted" style="cursor:pointer">Advanced</summary>${adv.map(fieldRow).join("")}</details>` : ""}</fieldset>`;
+    return `<fieldset><legend>${esc(LABELS[sec] || sec)}</legend>${fs.filter(f => !f.advanced).map(fieldRow).join("")}${secretRow(sec)}${adv.length ? `<details style="margin:0 0 10px"><summary class="muted" style="cursor:pointer">Advanced</summary>${adv.map(fieldRow).join("")}</details>` : ""}</fieldset>`;
   }).join("");
+  $$("#settings-form [data-fix]").forEach(b => b.onclick = () => runFix(b.dataset.fix));
 }
 $("#settings-save").onclick = async () => {
   const body = {}; schema.forEach(f => { const el = $(`[name="${f.id}"]`); if (!el) return;

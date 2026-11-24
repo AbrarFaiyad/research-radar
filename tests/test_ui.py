@@ -394,6 +394,11 @@ def test_panel_asks_for_the_claude_subscription_token():
     from radar.ui import app as ui_app
 
     html = (Path(ui_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
-    assert "Claude subscription token (daily builds)" in html
+    assert "Claude subscription token" in html
+    # the card lives on the Daily builds tab, and Settings links to it
+    builds_tab = html.split('<section id="builds"', 1)[1].split("</section>", 1)[0]
+    assert 'id="build-key-card"' in builds_tab
+    assert 'openTab("builds"); $("#build-key-card")' in html
+    assert '"builds-key", "Set token"' in html
     assert "claude setup-token" in html and "CLAUDE_CODE_OAUTH_TOKEN" in html
     assert "Anthropic API key" not in html and "ANTHROPIC_API_KEY" not in html
